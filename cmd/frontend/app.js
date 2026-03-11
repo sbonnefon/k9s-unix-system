@@ -71,31 +71,70 @@ spotlight.target.position.set(0, 0, 0);
 scene.add(spotlight);
 scene.add(spotlight.target);
 
-// Visible light-cone mesh
-const coneGeo = new THREE.CylinderGeometry(0.1, 7, 30, 32, 1, true);
-const coneMat = new THREE.MeshBasicMaterial({
-  color: 0xffffff,
+// FSN-style cross-beam: two intersecting trapezoidal planes
+const BEAM_HEIGHT = 28;
+const BEAM_TOP_HALF = 0.15;
+const BEAM_BOT_HALF = 4;
+
+function makeBeamGeometry() {
+  const verts = new Float32Array([
+    -BEAM_TOP_HALF, BEAM_HEIGHT / 2, 0,
+     BEAM_TOP_HALF, BEAM_HEIGHT / 2, 0,
+     BEAM_BOT_HALF, -BEAM_HEIGHT / 2, 0,
+    -BEAM_BOT_HALF, -BEAM_HEIGHT / 2, 0,
+  ]);
+  const indices = [0, 3, 1, 1, 3, 2];
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const beamMat = new THREE.MeshBasicMaterial({
+  color: 0xddeeff,
   transparent: true,
   opacity: 0,
   side: THREE.DoubleSide,
   depthWrite: false,
   blending: THREE.AdditiveBlending,
 });
-const coneMesh = new THREE.Mesh(coneGeo, coneMat);
-coneMesh.visible = false;
-scene.add(coneMesh);
+
+const beamGroup = new THREE.Group();
+const beamPlane1 = new THREE.Mesh(makeBeamGeometry(), beamMat);
+const beamPlane2 = new THREE.Mesh(makeBeamGeometry(), beamMat);
+beamPlane2.rotation.y = Math.PI / 2; // perpendicular
+beamGroup.add(beamPlane1, beamPlane2);
+beamGroup.visible = false;
+scene.add(beamGroup);
+
+// Ground glow disc
+const glowGeo = new THREE.CircleGeometry(5, 48);
+const glowMat = new THREE.MeshBasicMaterial({
+  color: 0xffeedd,
+  transparent: true,
+  opacity: 0,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+const glowDisc = new THREE.Mesh(glowGeo, glowMat);
+glowDisc.rotation.x = -Math.PI / 2;
+glowDisc.visible = false;
+scene.add(glowDisc);
 
 // Spotlight animation state
 const spot = {
   active: false,
   fadingIn: false,
   fadingOut: false,
-  intensity: 0,         // current spotlight intensity
-  coneOpacity: 0,       // current cone opacity
-  targetIntensity: 60,  // peak
-  targetConeOpacity: 0.06,
-  fadeSpeed: 2.5,       // units per second
-  nsName: null,         // which namespace is spotlighted
+  intensity: 0,
+  beamOpacity: 0,
+  glowOpacity: 0,
+  targetIntensity: 60,
+  targetBeamOpacity: 0.045,
+  targetGlowOpacity: 0.18,
+  fadeSpeed: 2.5,
+  nsName: null,
 };
 
 const BASE_AMBIENT = 0.8;
@@ -109,14 +148,15 @@ function positionSpotlight(nsName) {
   spotlight.position.set(wp.x, wp.y + 30, wp.z);
   spotlight.target.position.copy(wp);
 
-  coneMesh.position.set(wp.x, wp.y + 15, wp.z);
-  coneMesh.rotation.set(0, 0, 0);
+  beamGroup.position.set(wp.x, wp.y + BEAM_HEIGHT / 2, wp.z);
+  glowDisc.position.set(wp.x, wp.y + 0.05, wp.z);
 }
 
 function startSpotlight(nsName) {
   spot.nsName = nsName;
   positionSpotlight(nsName);
-  coneMesh.visible = true;
+  beamGroup.visible = true;
+  glowDisc.visible = true;
   spot.fadingIn = true;
   spot.fadingOut = false;
   spot.active = true;
@@ -131,23 +171,27 @@ function fadeOutSpotlight() {
 function updateSpotlight(dt) {
   if (spot.fadingIn) {
     spot.intensity = Math.min(spot.intensity + spot.fadeSpeed * dt * spot.targetIntensity, spot.targetIntensity);
-    spot.coneOpacity = Math.min(spot.coneOpacity + spot.fadeSpeed * dt * spot.targetConeOpacity, spot.targetConeOpacity);
+    spot.beamOpacity = Math.min(spot.beamOpacity + spot.fadeSpeed * dt * spot.targetBeamOpacity, spot.targetBeamOpacity);
+    spot.glowOpacity = Math.min(spot.glowOpacity + spot.fadeSpeed * dt * spot.targetGlowOpacity, spot.targetGlowOpacity);
     ambient.intensity = Math.max(ambient.intensity - spot.fadeSpeed * dt * (BASE_AMBIENT - DIM_AMBIENT), DIM_AMBIENT);
     if (spot.intensity >= spot.targetIntensity) spot.fadingIn = false;
   }
   if (spot.fadingOut) {
     spot.intensity = Math.max(spot.intensity - spot.fadeSpeed * dt * spot.targetIntensity, 0);
-    spot.coneOpacity = Math.max(spot.coneOpacity - spot.fadeSpeed * dt * spot.targetConeOpacity, 0);
+    spot.beamOpacity = Math.max(spot.beamOpacity - spot.fadeSpeed * dt * spot.targetBeamOpacity, 0);
+    spot.glowOpacity = Math.max(spot.glowOpacity - spot.fadeSpeed * dt * spot.targetGlowOpacity, 0);
     ambient.intensity = Math.min(ambient.intensity + spot.fadeSpeed * dt * (BASE_AMBIENT - DIM_AMBIENT), BASE_AMBIENT);
     if (spot.intensity <= 0) {
       spot.fadingOut = false;
       spot.active = false;
-      coneMesh.visible = false;
+      beamGroup.visible = false;
+      glowDisc.visible = false;
       spot.nsName = null;
     }
   }
   spotlight.intensity = spot.intensity;
-  coneMat.opacity = spot.coneOpacity;
+  beamMat.opacity = spot.beamOpacity;
+  glowMat.opacity = spot.glowOpacity;
 }
 
 // Grid floor
