@@ -14,12 +14,16 @@ import (
 )
 
 type PodInfo struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Status    string `json:"status"`
-	Ready     bool   `json:"ready"`
-	Restarts  int32  `json:"restarts"`
-	Age       string `json:"age"`
+	Name          string            `json:"name"`
+	Namespace     string            `json:"namespace"`
+	Status        string            `json:"status"`
+	Ready         bool              `json:"ready"`
+	Restarts      int32             `json:"restarts"`
+	Age           string            `json:"age"`
+	NodeName      string            `json:"nodeName"`
+	CPURequest    int64             `json:"cpuRequest"`    // millicores
+	MemoryRequest int64             `json:"memoryRequest"` // bytes
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 type NamespaceInfo struct {
@@ -28,11 +32,30 @@ type NamespaceInfo struct {
 	Pods   []PodInfo `json:"pods"`
 }
 
+type NodeInfo struct {
+	Name           string `json:"name"`
+	Status         string `json:"status"` // "Ready" or "NotReady"
+	CPUCapacity    int64  `json:"cpuCapacity"`    // millicores
+	MemoryCapacity int64  `json:"memoryCapacity"` // bytes
+}
+
+type ServiceInfo struct {
+	Name      string            `json:"name"`
+	Namespace string            `json:"namespace"`
+	Type      string            `json:"type"`
+	ClusterIP string            `json:"clusterIP"`
+	Selector  map[string]string `json:"selector,omitempty"`
+}
+
 type Event struct {
-	Type      string      `json:"type"` // "snapshot", "pod_added", "pod_modified", "pod_deleted", "ns_added", "ns_deleted"
-	Namespace string      `json:"namespace,omitempty"`
-	Pod       *PodInfo    `json:"pod,omitempty"`
+	Type      string          `json:"type"`
+	Namespace string          `json:"namespace,omitempty"`
+	Pod       *PodInfo        `json:"pod,omitempty"`
 	Snapshot  []NamespaceInfo `json:"snapshot,omitempty"`
+	Node      *NodeInfo       `json:"node,omitempty"`
+	Nodes     []NodeInfo      `json:"nodes,omitempty"`
+	Service   *ServiceInfo    `json:"service,omitempty"`
+	Services  []ServiceInfo   `json:"services,omitempty"`
 }
 
 type Watcher struct {
@@ -40,6 +63,8 @@ type Watcher struct {
 	mu         sync.RWMutex
 	namespaces map[string]*NamespaceInfo
 	pods       map[string]map[string]*PodInfo // ns -> pod name -> pod
+	nodes      map[string]*NodeInfo
+	services   map[string]map[string]*ServiceInfo // ns -> svc name -> svc
 	eventCh    chan Event
 	stopCh     chan struct{}
 }
@@ -64,6 +89,8 @@ func NewWatcher(kubecontext string) (*Watcher, error) {
 		clientset:  clientset,
 		namespaces: make(map[string]*NamespaceInfo),
 		pods:       make(map[string]map[string]*PodInfo),
+		nodes:      make(map[string]*NodeInfo),
+		services:   make(map[string]map[string]*ServiceInfo),
 		eventCh:    make(chan Event, 256),
 		stopCh:     make(chan struct{}),
 	}, nil
@@ -90,6 +117,30 @@ func (w *Watcher) Snapshot() []NamespaceInfo {
 	return result
 }
 
+func (w *Watcher) SnapshotNodes() []NodeInfo {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	result := make([]NodeInfo, 0, len(w.nodes))
+	for _, n := range w.nodes {
+		result = append(result, *n)
+	}
+	return result
+}
+
+func (w *Watcher) SnapshotServices() []ServiceInfo {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	result := make([]ServiceInfo, 0)
+	for _, svcs := range w.services {
+		for _, s := range svcs {
+			result = append(result, *s)
+		}
+	}
+	return result
+}
+
 func (w *Watcher) Start(ctx context.Context) error {
 	// Initial list
 	nsList, err := w.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
@@ -99,6 +150,14 @@ func (w *Watcher) Start(ctx context.Context) error {
 	podList, err := w.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("list pods: %w", err)
+	}
+	nodeList, err := w.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list nodes: %w", err)
+	}
+	svcList, err := w.clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list services: %w", err)
 	}
 
 	w.mu.Lock()
@@ -115,15 +174,33 @@ func (w *Watcher) Start(ctx context.Context) error {
 		}
 		w.pods[pod.Namespace][pod.Name] = &info
 	}
+	for i := range nodeList.Items {
+		node := &nodeList.Items[i]
+		info := nodeToInfo(node)
+		w.nodes[node.Name] = &info
+	}
+	for i := range svcList.Items {
+		svc := &svcList.Items[i]
+		info := serviceToInfo(svc)
+		if w.services[svc.Namespace] == nil {
+			w.services[svc.Namespace] = make(map[string]*ServiceInfo)
+		}
+		w.services[svc.Namespace][svc.Name] = &info
+	}
 	w.mu.Unlock()
 
 	// Send initial snapshot
-	w.emit(Event{Type: "snapshot", Snapshot: w.Snapshot()})
+	w.emit(Event{
+		Type:     "snapshot",
+		Snapshot: w.Snapshot(),
+		Nodes:    w.SnapshotNodes(),
+		Services: w.SnapshotServices(),
+	})
 
-	// Watch namespaces
 	go w.watchNamespaces(ctx, nsList.ResourceVersion)
-	// Watch pods
 	go w.watchPods(ctx, podList.ResourceVersion)
+	go w.watchNodes(ctx, nodeList.ResourceVersion)
+	go w.watchServices(ctx, svcList.ResourceVersion)
 
 	return nil
 }
@@ -259,12 +336,148 @@ func podToInfo(pod *corev1.Pod) PodInfo {
 
 	age := time.Since(pod.CreationTimestamp.Time).Truncate(time.Second).String()
 
+	var cpuMillis, memBytes int64
+	for _, c := range pod.Spec.Containers {
+		if cpu, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+			cpuMillis += cpu.MilliValue()
+		}
+		if mem, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+			memBytes += mem.Value()
+		}
+	}
+
 	return PodInfo{
-		Name:      pod.Name,
-		Namespace: pod.Namespace,
-		Status:    status,
-		Ready:     ready,
-		Restarts:  restarts,
-		Age:       age,
+		Name:          pod.Name,
+		Namespace:     pod.Namespace,
+		Status:        status,
+		Ready:         ready,
+		Restarts:      restarts,
+		Age:           age,
+		NodeName:      pod.Spec.NodeName,
+		CPURequest:    cpuMillis,
+		MemoryRequest: memBytes,
+		Labels:        pod.Labels,
+	}
+}
+
+func nodeToInfo(node *corev1.Node) NodeInfo {
+	status := "NotReady"
+	for _, cond := range node.Status.Conditions {
+		if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
+			status = "Ready"
+			break
+		}
+	}
+
+	var cpuMillis, memBytes int64
+	if cpu, ok := node.Status.Capacity[corev1.ResourceCPU]; ok {
+		cpuMillis = cpu.MilliValue()
+	}
+	if mem, ok := node.Status.Capacity[corev1.ResourceMemory]; ok {
+		memBytes = mem.Value()
+	}
+
+	return NodeInfo{
+		Name:           node.Name,
+		Status:         status,
+		CPUCapacity:    cpuMillis,
+		MemoryCapacity: memBytes,
+	}
+}
+
+func serviceToInfo(svc *corev1.Service) ServiceInfo {
+	return ServiceInfo{
+		Name:      svc.Name,
+		Namespace: svc.Namespace,
+		Type:      string(svc.Spec.Type),
+		ClusterIP: svc.Spec.ClusterIP,
+		Selector:  svc.Spec.Selector,
+	}
+}
+
+func (w *Watcher) watchNodes(ctx context.Context, rv string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.stopCh:
+			return
+		default:
+		}
+
+		watcher, err := w.clientset.CoreV1().Nodes().Watch(ctx, metav1.ListOptions{ResourceVersion: rv})
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		for event := range watcher.ResultChan() {
+			node, ok := event.Object.(*corev1.Node)
+			if !ok {
+				continue
+			}
+			rv = node.ResourceVersion
+			info := nodeToInfo(node)
+
+			switch event.Type {
+			case watch.Added, watch.Modified:
+				w.mu.Lock()
+				w.nodes[node.Name] = &info
+				w.mu.Unlock()
+				w.emit(Event{Type: "node_updated", Node: &info})
+
+			case watch.Deleted:
+				w.mu.Lock()
+				delete(w.nodes, node.Name)
+				w.mu.Unlock()
+				w.emit(Event{Type: "node_deleted", Node: &info})
+			}
+		}
+	}
+}
+
+func (w *Watcher) watchServices(ctx context.Context, rv string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.stopCh:
+			return
+		default:
+		}
+
+		watcher, err := w.clientset.CoreV1().Services("").Watch(ctx, metav1.ListOptions{ResourceVersion: rv})
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		for event := range watcher.ResultChan() {
+			svc, ok := event.Object.(*corev1.Service)
+			if !ok {
+				continue
+			}
+			rv = svc.ResourceVersion
+			info := serviceToInfo(svc)
+
+			switch event.Type {
+			case watch.Added, watch.Modified:
+				w.mu.Lock()
+				if w.services[svc.Namespace] == nil {
+					w.services[svc.Namespace] = make(map[string]*ServiceInfo)
+				}
+				w.services[svc.Namespace][svc.Name] = &info
+				w.mu.Unlock()
+				w.emit(Event{Type: "svc_updated", Namespace: svc.Namespace, Service: &info})
+
+			case watch.Deleted:
+				w.mu.Lock()
+				if w.services[svc.Namespace] != nil {
+					delete(w.services[svc.Namespace], svc.Name)
+				}
+				w.mu.Unlock()
+				w.emit(Event{Type: "svc_deleted", Namespace: svc.Namespace, Service: &info})
+			}
+		}
 	}
 }

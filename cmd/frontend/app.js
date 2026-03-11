@@ -6,15 +6,22 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 // ── State ──────────────────────────────────────────────────────
 const state = {
   namespaces: new Map(), // name -> { group, platform, pods: Map<name, mesh>, label }
+  nodes: new Map(),      // name -> NodeInfo
+  nodeIsland: null,      // { group, platform, blocks: Map<name, mesh>, label }
+  services: [],          // [{name, namespace, type, clusterIP, selector}]
+  serviceLines: null,    // THREE.Group holding connection lines
 };
 
 const PLATFORM_GAP = 12;
-const POD_SIZE = 0.7;
+const POD_BASE_SIZE = 0.7;
+const POD_MIN_SIZE = 0.5;
+const POD_MAX_SIZE = 1.8;
 const POD_GAP = 1.5;
-const POD_STRIDE = POD_SIZE + POD_GAP;
+const POD_STRIDE = POD_MAX_SIZE + POD_GAP;
 const PLATFORM_Y = 0;
 const PLATFORM_HEIGHT = 0.3;
 const LABEL_Y_OFFSET = 0.5;
+const NODE_BLOCK_SIZE = 1.2;
 
 const STATUS_COLORS = {
   Running:            0x00ff88,
@@ -32,6 +39,13 @@ const STATUS_COLORS = {
 
 function statusColor(status) {
   return STATUS_COLORS[status] ?? 0x00ff88;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + 'B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + 'Ki';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(0) + 'Mi';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + 'Gi';
 }
 
 // ── Scene Setup ────────────────────────────────────────────────
@@ -165,10 +179,10 @@ const BASE_AMBIENT = 0.8;
 const DIM_AMBIENT = 0.25;
 
 function positionSpotlight(nsName) {
-  const ns = state.namespaces.get(nsName);
-  if (!ns) return;
+  const island = nsName === '__nodes__' ? state.nodeIsland : state.namespaces.get(nsName);
+  if (!island) return;
   const wp = new THREE.Vector3();
-  ns.group.getWorldPosition(wp);
+  island.group.getWorldPosition(wp);
 
   const sourcePos = wp.clone().add(BEAM_SOURCE_OFFSET);
   spotlight.position.copy(sourcePos);
@@ -258,12 +272,27 @@ function updateSpotlight(dt) {
 
 function showPodLabels(nsName) {
   clearPodLabels();
+
+  if (nsName === '__nodes__' && state.nodeIsland) {
+    const island = state.nodeIsland;
+    for (const [nodeName, blockMesh] of island.blocks) {
+      const label = makeLabel(nodeName, 28);
+      label.scale.set(0.12, 0.12, 0.12);
+      label.position.set(blockMesh.position.x, 0.15, blockMesh.position.z + NODE_BLOCK_SIZE / 2 + 0.6);
+      label.material.opacity = 0;
+      island.group.add(label);
+      spot.podLabels.push({ mesh: label, group: island.group });
+    }
+    return;
+  }
+
   const ns = state.namespaces.get(nsName);
   if (!ns) return;
   for (const [podName, podMesh] of ns.pods) {
     const label = makeLabel(podName, 28);
     label.scale.set(0.12, 0.12, 0.12);
-    label.position.set(podMesh.position.x, 0.15, podMesh.position.z + POD_SIZE / 2 + 0.6);
+    const d = podMesh.geometry.parameters.depth || POD_BASE_SIZE;
+    label.position.set(podMesh.position.x, 0.15, podMesh.position.z + d / 2 + 0.6);
     label.material.opacity = 0;
     ns.group.add(label);
     spot.podLabels.push({ mesh: label, group: ns.group });
@@ -296,6 +325,51 @@ const platformMaterial = new THREE.MeshPhongMaterial({
 
 function podMaterial(status) {
   const color = statusColor(status);
+  return new THREE.MeshPhongMaterial({
+    color,
+    emissive: new THREE.Color(color).multiplyScalar(0.3),
+    shininess: 60,
+    transparent: true,
+    opacity: 0.9,
+  });
+}
+
+// ── Resource Sizing ────────────────────────────────────────────
+// CPU: 100m → POD_MIN_SIZE, 2000m+ → POD_MAX_SIZE
+// Memory: 64Mi → POD_MIN_SIZE, 2Gi+ → POD_MAX_SIZE
+const CPU_MIN = 100;
+const CPU_MAX = 2000;
+const MEM_MIN = 64 * 1024 * 1024;
+const MEM_MAX = 2 * 1024 * 1024 * 1024;
+
+function podWidth(cpuMillis) {
+  if (!cpuMillis || cpuMillis <= 0) return POD_BASE_SIZE;
+  const t = Math.max(0, Math.min(1, (cpuMillis - CPU_MIN) / (CPU_MAX - CPU_MIN)));
+  return POD_MIN_SIZE + t * (POD_MAX_SIZE - POD_MIN_SIZE);
+}
+
+function podDepth(memBytes) {
+  if (!memBytes || memBytes <= 0) return POD_BASE_SIZE;
+  const t = Math.max(0, Math.min(1, (memBytes - MEM_MIN) / (MEM_MAX - MEM_MIN)));
+  return POD_MIN_SIZE + t * (POD_MAX_SIZE - POD_MIN_SIZE);
+}
+
+// ── Node Island Materials ───────────────────────────────────────
+const nodePlatformMaterial = new THREE.MeshPhongMaterial({
+  color: 0x224466,
+  emissive: 0x112244,
+  shininess: 30,
+  transparent: true,
+  opacity: 0.85,
+});
+
+const NODE_BLOCK_COLORS = {
+  Ready:    0x00ccff,
+  NotReady: 0xff4444,
+};
+
+function nodeBlockMaterial(status) {
+  const color = NODE_BLOCK_COLORS[status] ?? 0x00ccff;
   return new THREE.MeshPhongMaterial({
     color,
     emissive: new THREE.Color(color).multiplyScalar(0.3),
@@ -362,50 +436,78 @@ function makeBeveledPlatformGeo(width, height, depth) {
 
 // ── Namespace Layout ───────────────────────────────────────────
 function layoutNamespaces() {
+  // Build the node island first so we can include it in the grid
+  if (state.nodes.size > 0) {
+    rebuildNodeIsland();
+    layoutNodeIsland();
+  }
+
+  // Collect all islands: node island (if any) + namespace groups
+  const entries = []; // { group, platWidth, platDepth }
+  if (state.nodeIsland && state.nodeIsland.blocks.size > 0) {
+    const blockStride = NODE_BLOCK_SIZE + 1.2;
+    const blockCols = Math.max(2, Math.ceil(Math.sqrt(state.nodeIsland.blocks.size)));
+    const blockRows = Math.max(1, Math.ceil(state.nodeIsland.blocks.size / blockCols));
+    entries.push({
+      group: state.nodeIsland.group,
+      platWidth: blockCols * blockStride + 2,
+      platDepth: blockRows * blockStride + 2,
+    });
+  }
+
   const nsList = [...state.namespaces.keys()].sort();
-  const cols = Math.max(1, Math.ceil(Math.sqrt(nsList.length)));
-
-  nsList.forEach((nsName, i) => {
+  for (const nsName of nsList) {
     const ns = state.namespaces.get(nsName);
-    const col = i % cols;
-    const row = Math.floor(i / cols);
-
     const podCount = ns.pods.size;
     const podCols = Math.max(2, Math.ceil(Math.sqrt(podCount)));
     const podRows = Math.max(1, Math.ceil(podCount / podCols));
     const platWidth = podCols * POD_STRIDE + 2;
     const platDepth = podRows * POD_STRIDE + 2;
+    entries.push({ group: ns.group, platWidth, platDepth, nsName });
+  }
 
-    const x = col * (platWidth + PLATFORM_GAP) - (cols * (platWidth + PLATFORM_GAP)) / 2;
-    const z = row * (platDepth + PLATFORM_GAP) - (cols * (platDepth + PLATFORM_GAP)) / 2;
+  const cols = Math.max(1, Math.ceil(Math.sqrt(entries.length)));
 
-    ns.group.position.set(x, PLATFORM_Y, z);
+  entries.forEach((entry, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = col * (entry.platWidth + PLATFORM_GAP) - (cols * (entry.platWidth + PLATFORM_GAP)) / 2;
+    const z = row * (entry.platDepth + PLATFORM_GAP) - (cols * (entry.platDepth + PLATFORM_GAP)) / 2;
+    entry.group.position.set(x, PLATFORM_Y, z);
+
+    // Skip node island — already built by rebuildNodeIsland/layoutNodeIsland
+    if (!entry.nsName) return;
+
+    const ns = state.namespaces.get(entry.nsName);
 
     // Rebuild platform geometry
     if (ns.platform) {
       ns.platform.material.dispose();
       ns.group.remove(ns.platform);
     }
-    const platGeo = makeBeveledPlatformGeo(platWidth, PLATFORM_HEIGHT, platDepth);
+    const platGeo = makeBeveledPlatformGeo(entry.platWidth, PLATFORM_HEIGHT, entry.platDepth);
     ns.platform = new THREE.Mesh(platGeo, platformMaterial.clone());
     ns.platform.position.y = -PLATFORM_HEIGHT / 2;
-    ns.platform.userData = { type: 'namespace', name: nsName };
+    ns.platform.userData = { type: 'namespace', name: entry.nsName };
     ns.group.add(ns.platform);
 
     // Reposition label
     if (ns.label) ns.group.remove(ns.label);
-    ns.label = makeLabel(nsName.toUpperCase());
-    ns.label.position.set(0, 0.15, platDepth / 2 + 2);
+    ns.label = makeLabel(entry.nsName.toUpperCase());
+    ns.label.position.set(0, 0.15, entry.platDepth / 2 + 2);
     ns.group.add(ns.label);
 
     // Lay out pods
+    const podCols = Math.max(2, Math.ceil(Math.sqrt(ns.pods.size)));
+    const podRows = Math.max(1, Math.ceil(ns.pods.size / podCols));
     let idx = 0;
     for (const [, podMesh] of ns.pods) {
       const pc = idx % podCols;
       const pr = Math.floor(idx / podCols);
+      const h = podMesh.geometry.parameters.height || POD_BASE_SIZE;
       podMesh.position.set(
         pc * POD_STRIDE - (podCols * POD_STRIDE) / 2 + POD_STRIDE / 2,
-        POD_SIZE / 2,
+        h / 2,
         pr * POD_STRIDE - (podRows * POD_STRIDE) / 2 + POD_STRIDE / 2
       );
       idx++;
@@ -435,16 +537,25 @@ function ensureNamespace(name) {
 function addOrUpdatePod(nsName, pod) {
   const ns = ensureNamespace(nsName);
 
+  const w = podWidth(pod.cpuRequest);
+  const d = podDepth(pod.memoryRequest);
+  const height = POD_BASE_SIZE + Math.min(pod.restarts * 0.15, 2);
+
   if (ns.pods.has(pod.name)) {
     const existing = ns.pods.get(pod.name);
     existing.material.dispose();
     existing.material = podMaterial(pod.status);
+    // Rebuild geometry if resources changed
+    const oldPod = existing.userData.pod;
+    if (oldPod.cpuRequest !== pod.cpuRequest || oldPod.memoryRequest !== pod.memoryRequest || oldPod.restarts !== pod.restarts) {
+      existing.geometry.dispose();
+      existing.geometry = new THREE.BoxGeometry(w, height, d);
+    }
     existing.userData = { type: 'pod', pod };
     return;
   }
 
-  const height = POD_SIZE + Math.min(pod.restarts * 0.15, 2);
-  const geo = new THREE.BoxGeometry(POD_SIZE, height, POD_SIZE);
+  const geo = new THREE.BoxGeometry(w, height, d);
   const mat = podMaterial(pod.status);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.userData = { type: 'pod', pod };
@@ -476,12 +587,164 @@ function removeNamespace(name) {
   state.namespaces.delete(name);
 }
 
+// ── Node Island ────────────────────────────────────────────────
+function ensureNodeIsland() {
+  if (state.nodeIsland) return state.nodeIsland;
+  const group = new THREE.Group();
+  group.userData = { type: 'namespace', name: '__nodes__' };
+  scene.add(group);
+  state.nodeIsland = { group, platform: null, blocks: new Map(), label: null };
+  return state.nodeIsland;
+}
+
+function rebuildNodeIsland() {
+  const island = ensureNodeIsland();
+
+  // Remove old blocks
+  for (const [, mesh] of island.blocks) {
+    island.group.remove(mesh);
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+  }
+  island.blocks.clear();
+
+  // Create a block per node
+  const nodeList = [...state.nodes.keys()].sort();
+  for (const name of nodeList) {
+    const info = state.nodes.get(name);
+    const geo = new THREE.BoxGeometry(NODE_BLOCK_SIZE, NODE_BLOCK_SIZE, NODE_BLOCK_SIZE);
+    const mat = nodeBlockMaterial(info.status);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.userData = { type: 'nodeBlock', node: info };
+    island.blocks.set(name, mesh);
+    island.group.add(mesh);
+  }
+}
+
+function layoutNodeIsland() {
+  const island = state.nodeIsland;
+  if (!island) return;
+
+  const blockCount = island.blocks.size;
+  if (blockCount === 0) return;
+
+  const blockStride = NODE_BLOCK_SIZE + 1.2;
+  const blockCols = Math.max(2, Math.ceil(Math.sqrt(blockCount)));
+  const blockRows = Math.max(1, Math.ceil(blockCount / blockCols));
+  const platWidth = blockCols * blockStride + 2;
+  const platDepth = blockRows * blockStride + 2;
+
+  // Rebuild platform
+  if (island.platform) {
+    island.platform.material.dispose();
+    island.group.remove(island.platform);
+  }
+  const platGeo = makeBeveledPlatformGeo(platWidth, PLATFORM_HEIGHT, platDepth);
+  island.platform = new THREE.Mesh(platGeo, nodePlatformMaterial.clone());
+  island.platform.position.y = -PLATFORM_HEIGHT / 2;
+  island.platform.userData = { type: 'namespace', name: '__nodes__' };
+  island.group.add(island.platform);
+
+  // Rebuild label
+  if (island.label) island.group.remove(island.label);
+  island.label = makeLabel('NODES');
+  island.label.position.set(0, 0.15, platDepth / 2 + 2);
+  island.group.add(island.label);
+
+  // Lay out blocks
+  let idx = 0;
+  for (const [, mesh] of island.blocks) {
+    const pc = idx % blockCols;
+    const pr = Math.floor(idx / blockCols);
+    mesh.position.set(
+      pc * blockStride - (blockCols * blockStride) / 2 + blockStride / 2,
+      NODE_BLOCK_SIZE / 2,
+      pr * blockStride - (blockRows * blockStride) / 2 + blockStride / 2,
+    );
+    idx++;
+  }
+
+  return { platWidth, platDepth };
+}
+
+// ── Service Connection Lines ───────────────────────────────────
+function selectorMatchesLabels(selector, labels) {
+  if (!selector || !labels) return false;
+  for (const [k, v] of Object.entries(selector)) {
+    if (labels[k] !== v) return false;
+  }
+  return true;
+}
+
+function rebuildServiceLines() {
+  if (state.serviceLines) {
+    scene.remove(state.serviceLines);
+    state.serviceLines.traverse((child) => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    });
+  }
+
+  const group = new THREE.Group();
+  group.userData = { type: 'serviceLines' };
+
+  const lineMat = new THREE.LineBasicMaterial({
+    color: 0x00aaff,
+    transparent: true,
+    opacity: 0.25,
+    depthWrite: false,
+  });
+
+  for (const svc of state.services) {
+    if (!svc.selector || Object.keys(svc.selector).length === 0) continue;
+
+    const ns = state.namespaces.get(svc.namespace);
+    if (!ns) continue;
+
+    // Find matching pods
+    const matchedMeshes = [];
+    for (const [, podMesh] of ns.pods) {
+      const pod = podMesh.userData.pod;
+      if (pod && selectorMatchesLabels(svc.selector, pod.labels)) {
+        matchedMeshes.push(podMesh);
+      }
+    }
+
+    if (matchedMeshes.length < 2) continue;
+
+    // Draw lines between all matched pods (star topology from first pod)
+    const worldPos = (mesh) => {
+      const v = new THREE.Vector3();
+      mesh.getWorldPosition(v);
+      return v;
+    };
+
+    const anchor = worldPos(matchedMeshes[0]);
+    for (let j = 1; j < matchedMeshes.length; j++) {
+      const target = worldPos(matchedMeshes[j]);
+      // Curved arc: midpoint lifted above
+      const mid = anchor.clone().add(target).multiplyScalar(0.5);
+      mid.y += 2;
+      const curve = new THREE.QuadraticBezierCurve3(anchor, mid, target);
+      const points = curve.getPoints(16);
+      const geo = new THREE.BufferGeometry().setFromPoints(points);
+      const line = new THREE.Line(geo, lineMat.clone());
+      group.add(line);
+    }
+  }
+
+  state.serviceLines = group;
+  scene.add(group);
+}
+
 // ── HUD Update ─────────────────────────────────────────────────
 function updateHUD() {
   let pods = 0;
   for (const [, ns] of state.namespaces) pods += ns.pods.size;
   document.getElementById('ns-count').textContent = state.namespaces.size;
   document.getElementById('pod-count').textContent = pods;
+  document.getElementById('node-count').textContent = state.nodes.size;
+  document.getElementById('svc-count').textContent = state.services.length;
 }
 
 // ── WebSocket ──────────────────────────────────────────────────
@@ -516,7 +779,15 @@ function handleEvent(event) {
           addOrUpdatePod(ns.name, pod);
         }
       }
+      // Nodes
+      state.nodes.clear();
+      for (const node of event.nodes ?? []) {
+        state.nodes.set(node.name, node);
+      }
+      // Services
+      state.services = event.services ?? [];
       layoutNamespaces();
+      rebuildServiceLines();
       updateHUD();
       break;
 
@@ -524,12 +795,14 @@ function handleEvent(event) {
     case 'pod_modified':
       addOrUpdatePod(event.namespace, event.pod);
       layoutNamespaces();
+      rebuildServiceLines();
       updateHUD();
       break;
 
     case 'pod_deleted':
       removePod(event.namespace, event.pod.name);
       layoutNamespaces();
+      rebuildServiceLines();
       updateHUD();
       break;
 
@@ -542,6 +815,37 @@ function handleEvent(event) {
     case 'ns_deleted':
       removeNamespace(event.namespace);
       layoutNamespaces();
+      rebuildServiceLines();
+      updateHUD();
+      break;
+
+    case 'node_updated':
+      state.nodes.set(event.node.name, event.node);
+      layoutNamespaces();
+      updateHUD();
+      break;
+
+    case 'node_deleted':
+      state.nodes.delete(event.node.name);
+      layoutNamespaces();
+      updateHUD();
+      break;
+
+    case 'svc_updated':
+      if (event.service) {
+        const idx = state.services.findIndex(s => s.name === event.service.name && s.namespace === event.service.namespace);
+        if (idx >= 0) state.services[idx] = event.service;
+        else state.services.push(event.service);
+      }
+      rebuildServiceLines();
+      updateHUD();
+      break;
+
+    case 'svc_deleted':
+      if (event.service) {
+        state.services = state.services.filter(s => !(s.name === event.service.name && s.namespace === event.service.namespace));
+      }
+      rebuildServiceLines();
       updateHUD();
       break;
   }
@@ -572,14 +876,14 @@ function cancelFlyTo() {
 }
 
 function startFlyTo(nsName) {
-  const ns = state.namespaces.get(nsName);
-  if (!ns) return;
+  const island = nsName === '__nodes__' ? state.nodeIsland : state.namespaces.get(nsName);
+  if (!island) return;
 
   // Fade out any existing spotlight before flying to new target
   fadeOutSpotlight();
 
   const worldPos = new THREE.Vector3();
-  ns.group.getWorldPosition(worldPos);
+  island.group.getWorldPosition(worldPos);
 
   flyTo.startPos.copy(camera.position);
   flyTo.startQuat.copy(camera.quaternion);
@@ -774,7 +1078,7 @@ function updateRaycast() {
 
   const allMeshes = [];
   scene.traverse((obj) => {
-    if (obj.isMesh && obj.userData.type === 'pod') allMeshes.push(obj);
+    if (obj.isMesh && (obj.userData.type === 'pod' || obj.userData.type === 'nodeBlock')) allMeshes.push(obj);
   });
   const intersects = raycaster.intersectObjects(allMeshes);
 
@@ -786,18 +1090,32 @@ function updateRaycast() {
   if (intersects.length > 0) {
     hoveredMesh = intersects[0].object;
     hoveredMesh.material.emissiveIntensity = 3;
-    const pod = hoveredMesh.userData.pod;
-    const statusClass = pod.status === 'Running' ? 'status-running'
-      : ['Pending', 'ContainerCreating', 'PodInitializing'].includes(pod.status) ? 'status-pending'
-      : 'status-error';
-    tooltip.innerHTML = `
-      <div class="pod-name">${pod.name}</div>
-      <div class="pod-ns">ns/${pod.namespace}</div>
-      <div class="pod-status ${statusClass}">● ${pod.status}</div>
-      <div>Ready: ${pod.ready ? 'YES' : 'NO'} &middot; Restarts: ${pod.restarts}</div>
-      <div>Age: ${pod.age}</div>
-    `;
-    tooltip.style.display = 'block';
+
+    if (hoveredMesh.userData.type === 'nodeBlock') {
+      const node = hoveredMesh.userData.node;
+      const statusClass = node.status === 'Ready' ? 'status-running' : 'status-error';
+      tooltip.innerHTML = `
+        <div class="pod-name">${node.name}</div>
+        <div class="pod-ns">node</div>
+        <div class="pod-status ${statusClass}">● ${node.status}</div>
+        ${node.cpuCapacity ? `<div>CPU: ${node.cpuCapacity}m &middot; Mem: ${formatBytes(node.memoryCapacity)}</div>` : ''}
+      `;
+      tooltip.style.display = 'block';
+    } else {
+      const pod = hoveredMesh.userData.pod;
+      const statusClass = pod.status === 'Running' ? 'status-running'
+        : ['Pending', 'ContainerCreating', 'PodInitializing'].includes(pod.status) ? 'status-pending'
+        : 'status-error';
+      tooltip.innerHTML = `
+        <div class="pod-name">${pod.name}</div>
+        <div class="pod-ns">ns/${pod.namespace}${pod.nodeName ? ' · node/' + pod.nodeName : ''}</div>
+        <div class="pod-status ${statusClass}">● ${pod.status}</div>
+        <div>Ready: ${pod.ready ? 'YES' : 'NO'} &middot; Restarts: ${pod.restarts}</div>
+        ${pod.cpuRequest || pod.memoryRequest ? `<div>CPU: ${pod.cpuRequest ? pod.cpuRequest + 'm' : '—'} &middot; Mem: ${pod.memoryRequest ? formatBytes(pod.memoryRequest) : '—'}</div>` : ''}
+        <div>Age: ${pod.age}</div>
+      `;
+      tooltip.style.display = 'block';
+    }
   } else {
     tooltip.style.display = 'none';
   }
@@ -809,10 +1127,11 @@ function animatePods(time) {
     let i = 0;
     for (const [, mesh] of ns.pods) {
       const pod = mesh.userData.pod;
+      const h = mesh.geometry.parameters.height || POD_BASE_SIZE;
       if (pod && pod.status === 'Running') {
-        mesh.position.y = POD_SIZE / 2 + Math.sin(time * 2 + i * 0.5) * 0.05;
+        mesh.position.y = h / 2 + Math.sin(time * 2 + i * 0.5) * 0.05;
       } else if (pod && (pod.status === 'CrashLoopBackOff' || pod.status === 'Error')) {
-        mesh.position.y = POD_SIZE / 2 + Math.sin(time * 8 + i) * 0.15;
+        mesh.position.y = h / 2 + Math.sin(time * 8 + i) * 0.15;
       }
       i++;
     }
@@ -849,6 +1168,18 @@ function updateDepthTransparency() {
     if (ns.label) ns.label.material.opacity = BASE_LABEL_OPACITY * f;
 
     for (const [, mesh] of ns.pods) {
+      mesh.material.opacity = BASE_POD_OPACITY * f;
+    }
+  }
+
+  // Node island
+  if (state.nodeIsland) {
+    state.nodeIsland.group.getWorldPosition(_depthTmpVec);
+    const dist = eagleEye.active ? 0 : camPos.distanceTo(_depthTmpVec);
+    const f = depthOpacityFactor(dist);
+    if (state.nodeIsland.platform) state.nodeIsland.platform.material.opacity = BASE_PLATFORM_OPACITY * f;
+    if (state.nodeIsland.label) state.nodeIsland.label.material.opacity = BASE_LABEL_OPACITY * f;
+    for (const [, mesh] of state.nodeIsland.blocks) {
       mesh.material.opacity = BASE_POD_OPACITY * f;
     }
   }

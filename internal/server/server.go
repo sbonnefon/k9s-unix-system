@@ -58,7 +58,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial snapshot
 	snapshot := s.watcher.Snapshot()
-	msg, _ := json.Marshal(k8swatch.Event{Type: "snapshot", Snapshot: snapshot})
+	nodes := s.watcher.SnapshotNodes()
+	services := s.watcher.SnapshotServices()
+	msg, _ := json.Marshal(k8swatch.Event{
+		Type:     "snapshot",
+		Snapshot: snapshot,
+		Nodes:    nodes,
+		Services: services,
+	})
 	conn.WriteMessage(websocket.TextMessage, msg)
 
 	// Keep connection alive, read (and discard) client messages
