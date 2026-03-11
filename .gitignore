@@ -24,6 +24,9 @@ profile.cov
 go.work
 go.work.sum
 
+# Binary
+k8s-unix-system
+
 # env file
 .env
 
