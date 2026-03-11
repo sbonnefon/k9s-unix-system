@@ -103,6 +103,49 @@ composer.addPass(renderPass);
 const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.6, 0.4, 0.85);
 composer.addPass(bloom);
 
+// Horizon gradient sky (Jurassic Park FSN style)
+const skyGeo = new THREE.SphereGeometry(400, 32, 32);
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  depthWrite: false,
+  fog: false,
+  uniforms: {},
+  vertexShader: `
+    varying vec3 vWorldPos;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vWorldPos;
+    void main() {
+      float h = normalize(vWorldPos).y;
+      // Dark top
+      vec3 top    = vec3(0.02, 0.02, 0.06);
+      // Green horizon band
+      vec3 green  = vec3(0.05, 0.28, 0.12);
+      // Dark bottom
+      vec3 bottom = vec3(0.02, 0.02, 0.04);
+
+      vec3 col;
+      if (h > 0.0) {
+        // Above horizon: green fading to dark sky
+        float t = smoothstep(0.0, 0.35, h);
+        col = mix(green, top, t);
+      } else {
+        // Below horizon: green fading to dark ground
+        float t = smoothstep(0.0, 0.15, -h);
+        col = mix(green, bottom, t);
+      }
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+});
+const sky = new THREE.Mesh(skyGeo, skyMat);
+scene.add(sky);
+
 // Lights
 const ambient = new THREE.AmbientLight(0x334455, 0.8);
 scene.add(ambient);

@@ -6,6 +6,23 @@ A 3D Kubernetes resource viewer inspired by the FSN (File System Navigator) from
 
 Namespaces are rendered as raised platforms (islands), pods as 3D blocks on each island. Live updates via Kubernetes watch API. Fly through your cluster like it's 1993.
 
+## Quick Start (Docker)
+
+```bash
+docker run --rm -it \
+  -v ~/.kube/config:/root/.kube/config:ro \
+  -p 8080:8080 \
+  ghcr.io/jlandersen/k8s-unix-system:main
+
+# Use a specific kubeconfig context
+docker run --rm -it \
+  -v ~/.kube/config:/root/.kube/config:ro \
+  -p 8080:8080 \
+  ghcr.io/jlandersen/k8s-unix-system:main --context my-cluster
+```
+
+Then open http://localhost:8080.
+
 ## Install
 
 ```bash
