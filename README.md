@@ -1,12 +1,12 @@
 # 🦖 k8s Unix System
 
-A 3D Kubernetes resource viewer inspired by the FSN (File System Navigator) from Jurassic Park.
+A 3D Kubernetes resource viewer inspired by the FSN (File System Navigator) from Jurassic Park. Fly through your cluster like it's 1993.
 
 > "It's a Unix system! I know this!"
 
 https://github.com/user-attachments/assets/6817074a-63dc-4ffc-b991-aa2436c1c5b1
 
-Namespaces are rendered as raised platforms (islands), pods as 3D blocks on each island. Live updates via Kubernetes watch API. Fly through your cluster like it's 1993.
+Namespaces are rendered as raised platforms (islands), pods as 3D blocks on each island. Live updates via Kubernetes watch API.
 
 ## Quick Start (Docker)
 
