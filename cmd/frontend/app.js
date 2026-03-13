@@ -200,6 +200,17 @@ glowDisc.rotation.x = -Math.PI / 2;
 glowDisc.visible = false;
 scene.add(glowDisc);
 
+// Two-phase selection state
+const selection = {
+  phase: 'none',       // 'none' | 'namespace' | 'resource'
+  nsName: null,
+  resourceMesh: null,
+};
+
+// Spotlight intensity presets
+const SPOT_NS = { intensity: 24, beamOpacity: 0.015, glowOpacity: 0.04, beamWidth: 1.6 };
+const SPOT_RES = { intensity: 60, beamOpacity: 0.03, glowOpacity: 0.09, beamWidth: 0.45 };
+
 // Spotlight animation state
 const spot = {
   active: false,
@@ -208,9 +219,9 @@ const spot = {
   intensity: 0,
   beamOpacity: 0,
   glowOpacity: 0,
-  targetIntensity: 60,
-  targetBeamOpacity: 0.03,
-  targetGlowOpacity: 0.09,
+  targetIntensity: SPOT_NS.intensity,
+  targetBeamOpacity: SPOT_NS.beamOpacity,
+  targetGlowOpacity: SPOT_NS.glowOpacity,
   fadeSpeed: 2.5,
   nsName: null,
   podLabels: [],
@@ -225,34 +236,32 @@ function positionSpotlight(nsName) {
   const wp = new THREE.Vector3();
   island.group.getWorldPosition(wp);
 
+  const w = selection.phase === 'resource' ? SPOT_RES.beamWidth : SPOT_NS.beamWidth;
+
   const sourcePos = wp.clone().add(BEAM_SOURCE_OFFSET);
   spotlight.position.copy(sourcePos);
   spotlight.target.position.copy(wp);
+  spotlight.angle = Math.PI / 6 * w;
 
-  // Extend cone generously past ground — a clipping plane at ground level
-  // will cut it cleanly. The base circle is perpendicular to the tilted beam
-  // axis, so it must overshoot to cover the full ground footprint.
+  const botR = BEAM_BOT_RADIUS * w;
   const coneEnd = wp.clone();
   const beamDir = new THREE.Vector3().subVectors(coneEnd, sourcePos).normalize();
   const sinTilt = Math.sqrt(beamDir.x * beamDir.x + beamDir.z * beamDir.z);
-  const overshoot = (BEAM_BOT_RADIUS * sinTilt / Math.abs(beamDir.y)) * 1.5;
+  const overshoot = (botR * sinTilt / Math.abs(beamDir.y)) * 1.5;
   coneEnd.addScaledVector(beamDir, overshoot);
 
   beamClipPlane.set(new THREE.Vector3(0, 1, 0), -wp.y);
 
   const dist = sourcePos.distanceTo(coneEnd);
-  beamCone.scale.set(1, dist, 1);
+  beamCone.scale.set(w, dist, w);
   const mid = sourcePos.clone().add(coneEnd).multiplyScalar(0.5);
   beamCone.position.copy(mid);
   const upDir = new THREE.Vector3().subVectors(sourcePos, coneEnd).normalize();
   beamCone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), upDir);
 
-  // Shape the glow disc to match the cone's elliptical ground footprint.
-  // The cone radius at ground level is smaller than BEAM_BOT_RADIUS (base is
-  // below ground due to overshoot), and the tilt stretches it into an ellipse.
   const distToGround = sourcePos.distanceTo(wp);
   const tParam = distToGround / dist;
-  const rGround = BEAM_TOP_RADIUS + (BEAM_BOT_RADIUS - BEAM_TOP_RADIUS) * tParam;
+  const rGround = BEAM_TOP_RADIUS + (botR - BEAM_TOP_RADIUS) * tParam;
   const cosTilt = Math.abs(beamDir.y);
   const semiMajor = rGround / cosTilt;
   const semiMinor = rGround;
@@ -264,28 +273,91 @@ function positionSpotlight(nsName) {
 
 function startSpotlight(nsName) {
   spot.nsName = nsName;
+  spot.targetIntensity = SPOT_NS.intensity;
+  spot.targetBeamOpacity = SPOT_NS.beamOpacity;
+  spot.targetGlowOpacity = SPOT_NS.glowOpacity;
   positionSpotlight(nsName);
   beamCone.visible = true;
   glowDisc.visible = true;
   spot.fadingIn = true;
   spot.fadingOut = false;
   spot.active = true;
+  selection.phase = 'namespace';
+  selection.nsName = nsName;
+  selection.resourceMesh = null;
   showPodLabels(nsName);
+}
+
+function startResourceSpotlight(resourceMesh) {
+  const wp = new THREE.Vector3();
+  resourceMesh.getWorldPosition(wp);
+
+  const w = SPOT_RES.beamWidth;
+
+  const sourcePos = wp.clone().add(BEAM_SOURCE_OFFSET);
+  spotlight.position.copy(sourcePos);
+  spotlight.target.position.copy(wp);
+  spotlight.angle = Math.PI / 6 * w;
+
+  const botR = BEAM_BOT_RADIUS * w;
+  const coneEnd = wp.clone();
+  const beamDir = new THREE.Vector3().subVectors(coneEnd, sourcePos).normalize();
+  const sinTilt = Math.sqrt(beamDir.x * beamDir.x + beamDir.z * beamDir.z);
+  const overshoot = (botR * sinTilt / Math.abs(beamDir.y)) * 1.5;
+  coneEnd.addScaledVector(beamDir, overshoot);
+
+  beamClipPlane.set(new THREE.Vector3(0, 1, 0), -wp.y);
+
+  const dist = sourcePos.distanceTo(coneEnd);
+  beamCone.scale.set(w, dist, w);
+  const mid = sourcePos.clone().add(coneEnd).multiplyScalar(0.5);
+  beamCone.position.copy(mid);
+  const upDir = new THREE.Vector3().subVectors(sourcePos, coneEnd).normalize();
+  beamCone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), upDir);
+
+  const distToGround = sourcePos.distanceTo(wp);
+  const tParam = distToGround / dist;
+  const rGround = BEAM_TOP_RADIUS + (botR - BEAM_TOP_RADIUS) * tParam;
+  const cosTilt = Math.abs(beamDir.y);
+  const semiMajor = rGround / cosTilt;
+  const semiMinor = rGround;
+  const discAngle = Math.atan2(-beamDir.z, beamDir.x);
+  glowDisc.rotation.set(-Math.PI / 2, 0, discAngle);
+  glowDisc.scale.set(semiMajor / 3.5, semiMinor / 3.5, 1);
+  glowDisc.position.set(wp.x, wp.y + 0.05, wp.z);
+
+  spot.targetIntensity = SPOT_RES.intensity;
+  spot.targetBeamOpacity = SPOT_RES.beamOpacity;
+  spot.targetGlowOpacity = SPOT_RES.glowOpacity;
+  spot.fadingIn = true;
+  spot.fadingOut = false;
+
+  selection.phase = 'resource';
+  selection.resourceMesh = resourceMesh;
 }
 
 function fadeOutSpotlight() {
   if (!spot.active && !spot.fadingOut) return;
   spot.fadingIn = false;
   spot.fadingOut = true;
+  selection.phase = 'none';
+  selection.nsName = null;
+  selection.resourceMesh = null;
+}
+
+function lerpTo(current, target, step) {
+  if (current < target) return Math.min(current + step * target, target);
+  return Math.max(current - step * Math.abs(current), target);
 }
 
 function updateSpotlight(dt) {
   if (spot.fadingIn) {
-    spot.intensity = Math.min(spot.intensity + spot.fadeSpeed * dt * spot.targetIntensity, spot.targetIntensity);
-    spot.beamOpacity = Math.min(spot.beamOpacity + spot.fadeSpeed * dt * spot.targetBeamOpacity, spot.targetBeamOpacity);
-    spot.glowOpacity = Math.min(spot.glowOpacity + spot.fadeSpeed * dt * spot.targetGlowOpacity, spot.targetGlowOpacity);
+    const step = spot.fadeSpeed * dt;
+    spot.intensity = lerpTo(spot.intensity, spot.targetIntensity, step);
+    spot.beamOpacity = lerpTo(spot.beamOpacity, spot.targetBeamOpacity, step);
+    spot.glowOpacity = lerpTo(spot.glowOpacity, spot.targetGlowOpacity, step);
     ambient.intensity = Math.max(ambient.intensity - spot.fadeSpeed * dt * (BASE_AMBIENT - DIM_AMBIENT), DIM_AMBIENT);
-    if (spot.intensity >= spot.targetIntensity) spot.fadingIn = false;
+    if (Math.abs(spot.intensity - spot.targetIntensity) < 0.1) spot.fadingIn = false;
   }
   if (spot.fadingOut) {
     spot.intensity = Math.max(spot.intensity - spot.fadeSpeed * dt * spot.targetIntensity, 0);
@@ -1130,7 +1202,6 @@ function updateControlsHint() {
 
 canvas.addEventListener('click', (e) => {
   if (pointerLocked) return;
-  // Raycast against namespace labels and platforms
   const clickMouse = new THREE.Vector2(
     (e.clientX / window.innerWidth) * 2 - 1,
     -(e.clientY / window.innerHeight) * 2 + 1,
@@ -1138,6 +1209,23 @@ canvas.addEventListener('click', (e) => {
   const clickRay = new THREE.Raycaster();
   clickRay.setFromCamera(clickMouse, activeCamera());
 
+  // Phase 2: if a namespace is already selected, check for resource clicks first
+  if (selection.phase === 'namespace' || selection.phase === 'resource') {
+    ensureRayTargets();
+    const resHits = clickRay.intersectObjects(rayPodTargets);
+    if (resHits.length > 0) {
+      const resMesh = resHits[0].object;
+      const resNs = resMesh.userData.type === 'pod'
+        ? resMesh.userData.pod?.namespace
+        : resMesh.userData.type === 'nodeBlock' ? '__nodes__' : null;
+      if (resNs === selection.nsName) {
+        startResourceSpotlight(resMesh);
+        return;
+      }
+    }
+  }
+
+  // Phase 1: check for namespace / label clicks
   const targets = [];
   scene.traverse((obj) => {
     if (obj.userData.type === 'namespace') targets.push(obj);
@@ -1148,11 +1236,32 @@ canvas.addEventListener('click', (e) => {
     const hit = hits[0].object;
     const nsName = hit.userData.name ?? hit.parent?.userData?.name;
     if (nsName) {
+      // Clicking the already-selected namespace: back to namespace phase if in resource, no-op if in namespace
+      if (selection.phase !== 'none' && selection.nsName === nsName && !eagleEye.active) {
+        if (selection.phase === 'resource') {
+          selection.phase = 'namespace';
+          selection.resourceMesh = null;
+          positionSpotlight(nsName);
+          spot.targetIntensity = SPOT_NS.intensity;
+          spot.targetBeamOpacity = SPOT_NS.beamOpacity;
+          spot.targetGlowOpacity = SPOT_NS.glowOpacity;
+          spot.fadingIn = true;
+          spot.fadingOut = false;
+        }
+        return;
+      }
       if (eagleEye.active) toggleEagleEye();
       startFlyTo(nsName);
       return;
     }
   }
+
+  // Clicked empty space — deselect
+  if (selection.phase !== 'none') {
+    fadeOutSpotlight();
+    return;
+  }
+
   if (!eagleEye.active) canvas.requestPointerLock();
 });
 
@@ -1298,7 +1407,12 @@ function updateRaycast() {
 
   if (!pointerLocked) {
     const nsHits = raycaster.intersectObjects(rayNsTargets);
-    canvas.style.cursor = nsHits.length > 0 ? 'pointer' : 'default';
+    let showPointer = nsHits.length > 0;
+    if (!showPointer && (selection.phase === 'namespace' || selection.phase === 'resource')) {
+      const resHits = raycaster.intersectObjects(rayPodTargets);
+      showPointer = resHits.length > 0;
+    }
+    canvas.style.cursor = showPointer ? 'pointer' : 'default';
   }
 
   const intersects = raycaster.intersectObjects(rayPodTargets);
