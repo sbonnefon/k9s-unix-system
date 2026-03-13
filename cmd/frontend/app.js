@@ -292,6 +292,11 @@ function startResourceSpotlight(resourceMesh) {
   const wp = new THREE.Vector3();
   resourceMesh.getWorldPosition(wp);
 
+  // Platform surface Y from parent group (resource sits above it at h/2)
+  const groundPos = new THREE.Vector3();
+  resourceMesh.parent.getWorldPosition(groundPos);
+  const surfaceY = groundPos.y;
+
   const w = SPOT_RES.beamWidth;
 
   const sourcePos = wp.clone().add(BEAM_SOURCE_OFFSET);
@@ -306,7 +311,7 @@ function startResourceSpotlight(resourceMesh) {
   const overshoot = (botR * sinTilt / Math.abs(beamDir.y)) * 1.5;
   coneEnd.addScaledVector(beamDir, overshoot);
 
-  beamClipPlane.set(new THREE.Vector3(0, 1, 0), -wp.y);
+  beamClipPlane.set(new THREE.Vector3(0, 1, 0), -surfaceY);
 
   const dist = sourcePos.distanceTo(coneEnd);
   beamCone.scale.set(w, dist, w);
@@ -315,7 +320,8 @@ function startResourceSpotlight(resourceMesh) {
   const upDir = new THREE.Vector3().subVectors(sourcePos, coneEnd).normalize();
   beamCone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), upDir);
 
-  const distToGround = sourcePos.distanceTo(wp);
+  const groundTarget = new THREE.Vector3(wp.x, surfaceY, wp.z);
+  const distToGround = sourcePos.distanceTo(groundTarget);
   const tParam = distToGround / dist;
   const rGround = BEAM_TOP_RADIUS + (botR - BEAM_TOP_RADIUS) * tParam;
   const cosTilt = Math.abs(beamDir.y);
@@ -324,7 +330,7 @@ function startResourceSpotlight(resourceMesh) {
   const discAngle = Math.atan2(-beamDir.z, beamDir.x);
   glowDisc.rotation.set(-Math.PI / 2, 0, discAngle);
   glowDisc.scale.set(semiMajor / 3.5, semiMinor / 3.5, 1);
-  glowDisc.position.set(wp.x, wp.y + 0.05, wp.z);
+  glowDisc.position.set(wp.x, surfaceY + 0.05, wp.z);
 
   spot.targetIntensity = SPOT_RES.intensity;
   spot.targetBeamOpacity = SPOT_RES.beamOpacity;
