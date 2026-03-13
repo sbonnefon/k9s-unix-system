@@ -51,7 +51,7 @@ function formatBytes(bytes) {
 // ── Scene Setup ────────────────────────────────────────────────
 const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x020202);
 renderer.localClippingEnabled = true;
@@ -100,7 +100,10 @@ function updateOrthoFrustum() {
 const renderPass = new RenderPass(scene, camera);
 const composer = new EffectComposer(renderer);
 composer.addPass(renderPass);
-const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.6, 0.4, 0.85);
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth / 2, window.innerHeight / 2),
+  0.6, 0.4, 0.85,
+);
 composer.addPass(bloom);
 
 // Horizon gradient sky (Jurassic Park FSN style)
@@ -620,7 +623,6 @@ function layoutNamespaces() {
     camera.lookAt(0, 0, 0);
     euler.setFromQuaternion(camera.quaternion);
   }
-
   // Refresh pod labels if spotlight is active
   if (spot.active && spot.nsName) {
     showPodLabels(spot.nsName);
@@ -638,6 +640,7 @@ function ensureNamespace(name) {
   scene.add(group);
   const ns = { group, platform: null, pods: new Map(), label: null };
   state.namespaces.set(name, ns);
+  invalidateRayTargets();
   return ns;
 }
 
@@ -668,6 +671,7 @@ function addOrUpdatePod(nsName, pod) {
   mesh.userData = { type: 'pod', pod };
   ns.pods.set(pod.name, mesh);
   ns.group.add(mesh);
+  invalidateRayTargets();
 }
 
 function removePod(nsName, podName) {
@@ -679,6 +683,7 @@ function removePod(nsName, podName) {
     mesh.geometry.dispose();
     mesh.material.dispose();
     ns.pods.delete(podName);
+    invalidateRayTargets();
   }
 }
 
@@ -696,6 +701,7 @@ function removeNamespace(name) {
   if (ns.label) disposeMesh(ns.label);
   scene.remove(ns.group);
   state.namespaces.delete(name);
+  invalidateRayTargets();
 }
 
 // ── Node Island ────────────────────────────────────────────────
@@ -705,6 +711,7 @@ function ensureNodeIsland() {
   group.userData = { type: 'namespace', name: '__nodes__' };
   scene.add(group);
   state.nodeIsland = { group, platform: null, blocks: new Map(), label: null };
+  invalidateRayTargets();
   return state.nodeIsland;
 }
 
@@ -735,6 +742,7 @@ function clearNodeIsland() {
 
   scene.remove(island.group);
   state.nodeIsland = null;
+  invalidateRayTargets();
 }
 
 function rebuildNodeIsland() {
@@ -759,6 +767,7 @@ function rebuildNodeIsland() {
     island.blocks.set(name, mesh);
     island.group.add(mesh);
   }
+  invalidateRayTargets();
 }
 
 function layoutNodeIsland() {
@@ -997,6 +1006,7 @@ function handleEvent(event) {
 // ── Fly Camera Controller ──────────────────────────────────────
 const velocity = new THREE.Vector3();
 const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _camDir = new THREE.Vector3();
 const keys = {};
 let pointerLocked = false;
 
@@ -1150,15 +1160,119 @@ document.addEventListener('pointerlockchange', () => {
   pointerLocked = document.pointerLockElement === canvas;
 });
 
+let pendingMouseX = 0;
+let pendingMouseY = 0;
+let prevRawX = 0;
+let prevRawY = 0;
+
+// ── Mouse debug logger ─────────────────────────────────────────
+const mouseDbg = {
+  eventsThisFrame: 0,
+  coalescedThisFrame: 0,
+  rawMovements: [],
+  rawAccumX: 0, rawAccumY: 0,
+  smoothAppliedX: 0, smoothAppliedY: 0,
+  frameTimes: [],
+  hasFloat: false,
+  log: [],          // ring buffer of per-frame snapshots
+  logMax: 300,      // ~5s at 60fps
+};
+
+const dbgOverlay = document.createElement('div');
+dbgOverlay.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:100;font:11px monospace;color:#0f8;background:rgba(0,0,0,0.85);padding:8px 12px;border:1px solid #0f4;border-radius:4px;pointer-events:none;';
+dbgOverlay.textContent = '[F9] Capture mouse log to clipboard';
+document.body.appendChild(dbgOverlay);
+
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'F9') {
+    const last180 = mouseDbg.log.slice(-180); // last ~3s
+    const header = 'frame,dt_ms,render_ms,evts,coalesced,sub_px,raw_x,raw_y,movements';
+    const csv = last180.map(r =>
+      `${r.frame},${r.dt},${r.renderMs},${r.evts},${r.coalesced},${r.subPx},${r.rawX},${r.rawY},"${r.movements}"`
+    ).join('\n');
+    const text = header + '\n' + csv;
+    navigator.clipboard.writeText(text).then(() => {
+      dbgOverlay.textContent = `Copied ${last180.length} frames to clipboard!`;
+      dbgOverlay.style.color = '#ff0';
+      setTimeout(() => { dbgOverlay.textContent = '[F9] Capture mouse log to clipboard'; dbgOverlay.style.color = '#0f8'; }, 2000);
+    });
+  }
+});
+
 document.addEventListener('mousemove', (e) => {
   if (!pointerLocked) return;
   cancelFlyTo();
-  euler.setFromQuaternion(camera.quaternion);
-  euler.y -= e.movementX * 0.002;
-  euler.x -= e.movementY * 0.002;
+  pendingMouseX += e.movementX;
+  pendingMouseY += e.movementY;
+
+  mouseDbg.eventsThisFrame++;
+  mouseDbg.rawMovements.push([e.movementX, e.movementY]);
+  if (e.movementX % 1 !== 0 || e.movementY % 1 !== 0) mouseDbg.hasFloat = true;
+});
+
+function updateMouseLook() {
+  const rawX = pendingMouseX;
+  const rawY = pendingMouseY;
+  pendingMouseX = 0;
+  pendingMouseY = 0;
+
+  mouseDbg.rawAccumX = rawX;
+  mouseDbg.rawAccumY = rawY;
+
+  // Average when both frames have movement (smooth steady state).
+  // Use raw value at transitions (instant start, no ghost stop).
+  let dx, dy;
+  if (rawX !== 0 && prevRawX !== 0) {
+    dx = (rawX + prevRawX) * 0.5;
+  } else {
+    dx = rawX;
+  }
+  if (rawY !== 0 && prevRawY !== 0) {
+    dy = (rawY + prevRawY) * 0.5;
+  } else {
+    dy = rawY;
+  }
+  prevRawX = rawX;
+  prevRawY = rawY;
+
+  if (dx === 0 && dy === 0) {
+    mouseDbg.smoothAppliedX = 0;
+    mouseDbg.smoothAppliedY = 0;
+    return;
+  }
+
+  mouseDbg.smoothAppliedX = dx;
+  mouseDbg.smoothAppliedY = dy;
+
+  euler.y -= dx * 0.002;
+  euler.x -= dy * 0.002;
   euler.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, euler.x));
   camera.quaternion.setFromEuler(euler);
-});
+}
+
+function updateDebugOverlay(dt, renderMs) {
+  mouseDbg.frameTimes.push(dt);
+  if (mouseDbg.frameTimes.length > 60) mouseDbg.frameTimes.shift();
+
+  const movements = mouseDbg.rawMovements.map(([x, y]) => `${x},${y}`).join(' ');
+  mouseDbg.log.push({
+    frame: frameCount,
+    dt: (dt * 1000).toFixed(1),
+    renderMs: renderMs.toFixed(1),
+    evts: mouseDbg.eventsThisFrame,
+    coalesced: mouseDbg.coalescedThisFrame,
+    subPx: mouseDbg.hasFloat ? 1 : 0,
+    rawX: mouseDbg.rawAccumX.toFixed(2),
+    rawY: mouseDbg.rawAccumY.toFixed(2),
+    movements,
+  });
+  if (mouseDbg.log.length > mouseDbg.logMax) mouseDbg.log.shift();
+
+  mouseDbg.eventsThisFrame = 0;
+  mouseDbg.coalescedThisFrame = 0;
+  mouseDbg.rawMovements = [];
+  mouseDbg.hasFloat = false;
+}
 
 function updateCamera(dt) {
   if (eagleEye.active) {
@@ -1175,19 +1289,19 @@ function updateCamera(dt) {
   if (flyTo.active) { updateFlyTo(dt); return; }
 
   const speed = keys['ShiftLeft'] || keys['ShiftRight'] ? 40 : 15;
-  const direction = new THREE.Vector3();
 
-  if (keys['KeyW'] || keys['ArrowUp']) direction.z -= 1;
-  if (keys['KeyS'] || keys['ArrowDown']) direction.z += 1;
-  if (keys['KeyA'] || keys['ArrowLeft']) direction.x -= 1;
-  if (keys['KeyD'] || keys['ArrowRight']) direction.x += 1;
-  if (keys['Space']) direction.y += 1;
-  if (keys['ControlLeft'] || keys['ControlRight']) direction.y -= 1;
+  _camDir.set(0, 0, 0);
+  if (keys['KeyW'] || keys['ArrowUp']) _camDir.z -= 1;
+  if (keys['KeyS'] || keys['ArrowDown']) _camDir.z += 1;
+  if (keys['KeyA'] || keys['ArrowLeft']) _camDir.x -= 1;
+  if (keys['KeyD'] || keys['ArrowRight']) _camDir.x += 1;
+  if (keys['Space']) _camDir.y += 1;
+  if (keys['ControlLeft'] || keys['ControlRight']) _camDir.y -= 1;
 
-  direction.normalize();
-  direction.applyQuaternion(camera.quaternion);
+  _camDir.normalize();
+  _camDir.applyQuaternion(camera.quaternion);
 
-  velocity.lerp(direction.multiplyScalar(speed), 0.1);
+  velocity.lerp(_camDir.multiplyScalar(speed), 0.1);
   camera.position.addScaledVector(velocity, dt);
 }
 
@@ -1195,35 +1309,50 @@ function updateCamera(dt) {
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 let hoveredMesh = null;
+let mouseDirty = false;
 const tooltip = document.getElementById('tooltip');
 
+// Cached raycast target lists — rebuilt only when the scene mutates
+let rayNsTargets = [];
+let rayPodTargets = [];
+let rayTargetsDirty = true;
+
+function invalidateRayTargets() { rayTargetsDirty = true; }
+
+function ensureRayTargets() {
+  if (!rayTargetsDirty) return;
+  rayTargetsDirty = false;
+  rayNsTargets = [];
+  rayPodTargets = [];
+  scene.traverse((obj) => {
+    if (obj.userData.type === 'namespace' || obj.userData.type === 'label') rayNsTargets.push(obj);
+    if (obj.isMesh && (obj.userData.type === 'pod' || obj.userData.type === 'nodeBlock')) rayPodTargets.push(obj);
+  });
+}
+
 document.addEventListener('mousemove', (e) => {
+  if (pointerLocked) return;
   mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  mouseDirty = true;
 
-  // Tooltip position
   tooltip.style.left = (e.clientX + 16) + 'px';
   tooltip.style.top = (e.clientY + 16) + 'px';
 });
 
 function updateRaycast() {
+  if (!mouseDirty) return;
+  mouseDirty = false;
+
+  ensureRayTargets();
   raycaster.setFromCamera(mouse, activeCamera());
 
-  // Cursor hint for clickable namespace labels/platforms
   if (!pointerLocked) {
-    const nsTargets = [];
-    scene.traverse((obj) => {
-      if (obj.userData.type === 'namespace' || obj.userData.type === 'label') nsTargets.push(obj);
-    });
-    const nsHits = raycaster.intersectObjects(nsTargets);
+    const nsHits = raycaster.intersectObjects(rayNsTargets);
     canvas.style.cursor = nsHits.length > 0 ? 'pointer' : 'default';
   }
 
-  const allMeshes = [];
-  scene.traverse((obj) => {
-    if (obj.isMesh && (obj.userData.type === 'pod' || obj.userData.type === 'nodeBlock')) allMeshes.push(obj);
-  });
-  const intersects = raycaster.intersectObjects(allMeshes);
+  const intersects = raycaster.intersectObjects(rayPodTargets);
 
   if (hoveredMesh) {
     hoveredMesh.material.emissiveIntensity = 1;
@@ -1298,9 +1427,14 @@ function depthOpacityFactor(distance) {
 }
 
 const _depthTmpVec = new THREE.Vector3();
+const _lastDepthCamPos = new THREE.Vector3(Infinity, Infinity, Infinity);
 
 function updateDepthTransparency() {
   const camPos = activeCamera().position;
+
+  // Skip if camera hasn't moved meaningfully
+  if (_lastDepthCamPos.distanceToSquared(camPos) < 0.01) return;
+  _lastDepthCamPos.copy(camPos);
 
   for (const [, ns] of state.namespaces) {
     ns.group.getWorldPosition(_depthTmpVec);
@@ -1339,23 +1473,33 @@ window.addEventListener('resize', () => {
 
 // ── Animation Loop ─────────────────────────────────────────────
 const clock = new THREE.Clock();
+let frameCount = 0;
 
 function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
   const time = clock.getElapsedTime();
+  frameCount++;
 
+  updateMouseLook();
   updateCamera(dt);
   updateRaycast();
   updateSpotlight(dt);
-  animatePods(time);
   updateDepthTransparency();
+
+  if (frameCount & 1) {
+    animatePods(time);
+  }
 
   // Slowly rotate point light
   pointLight.position.x = Math.sin(time * 0.3) * 20;
   pointLight.position.z = Math.cos(time * 0.3) * 20;
 
+  const renderStart = performance.now();
   composer.render();
+  const renderMs = performance.now() - renderStart;
+
+  updateDebugOverlay(dt, renderMs);
 }
 
 // ── Boot ───────────────────────────────────────────────────────
