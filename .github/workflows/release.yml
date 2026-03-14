@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Release Notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          awk -v version="$VERSION" '
+            $0 ~ "^## \\[" version "\\] - " { capture = 1 }
+            capture {
+              if ($0 ~ "^## \\[" && $0 !~ "^## \\[" version "\\] - ") {
+                exit
+              }
+              print
+            }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+
+          if ! grep -q "^## \\[$VERSION\\] - " RELEASE_NOTES.md; then
+            echo "No CHANGELOG.md section found for version $VERSION"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
