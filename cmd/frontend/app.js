@@ -1491,18 +1491,40 @@ function rebuildIngressLines() {
     };
     group.add(marker);
 
+    // Compute junction point: centroid X of target pods, Z slightly in front of pods
+    let sumX = 0, sumZ = 0;
+    for (const podMesh of targetPodMeshes) {
+      sumX += podMesh.position.x;
+      sumZ += podMesh.position.z;
+    }
+    const jx = sumX / targetPodMeshes.length;
+    const jz = sumZ / targetPodMeshes.length;
+    // Junction is offset toward the ingress marker (front of platform)
+    const jzOffset = jz + (ml.z - jz) * 0.25;
+
+    // Trunk line: ingress marker → junction point
+    const trunkPath = orthogonalPath(ml.x, ml.z, jx, jzOffset);
+    const trunkWorld = trunkPath.map(p => {
+      const v = new THREE.Vector3(p.x, lineY, p.z);
+      ns.group.localToWorld(v);
+      return v;
+    });
+    if (trunkWorld.length >= 2) {
+      const geo = new THREE.BufferGeometry().setFromPoints(trunkWorld);
+      group.add(new THREE.Line(geo, lineMat.clone()));
+    }
+
+    // Branch lines: junction point → each pod
     for (const podMesh of targetPodMeshes) {
       const pl = { x: podMesh.position.x, z: podMesh.position.z };
-      const path = orthogonalPath(ml.x, ml.z, pl.x, pl.z);
-
-      const worldPts = path.map(p => {
+      const branchPts = orthogonalPath(jx, jzOffset, pl.x, pl.z);
+      const branchWorld = branchPts.map(p => {
         const v = new THREE.Vector3(p.x, lineY, p.z);
         ns.group.localToWorld(v);
         return v;
       });
-
-      if (worldPts.length >= 2) {
-        const geo = new THREE.BufferGeometry().setFromPoints(worldPts);
+      if (branchWorld.length >= 2) {
+        const geo = new THREE.BufferGeometry().setFromPoints(branchWorld);
         group.add(new THREE.Line(geo, lineMat.clone()));
       }
     }

@@ -6,6 +6,7 @@ All notable changes to `k8s-unix-system` are documented in this file.
 
 - Add details side panel for selected resources (pod, node, workload, service, ingress).
 - Fix search selection for ingresses now flies to and spotlights the ingress marker.
+- Simplify ingress connector lines with a trunk-and-branch layout instead of individual lines per pod.
 
 ## [1.1.0] - 2026-03-14
 
