@@ -92,6 +92,148 @@
     0%, 100% { opacity: 0.5; }
     50% { opacity: 1; }
   }
+
+  /* Omnisearch overlay */
+  #search-overlay {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 200;
+    display: none;
+    justify-content: center;
+    padding-top: 15vh;
+  }
+  #search-overlay.active { display: flex; }
+
+  #search-box {
+    width: 520px;
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #search-input-wrap {
+    position: relative;
+    background: rgba(0, 20, 10, 0.95);
+  }
+
+  #search-input {
+    width: 100%;
+    background: transparent;
+    border: 1px solid #00ff88;
+    color: #00ff88;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
+    font-size: 16px;
+    padding: 12px 16px;
+    outline: none;
+    box-shadow: 0 0 20px rgba(0, 255, 136, 0.2);
+    position: relative;
+    z-index: 1;
+  }
+  #search-input::placeholder { color: rgba(0, 255, 136, 0.35); }
+
+  #search-results {
+    overflow-y: auto;
+    background: rgba(0, 20, 10, 0.95);
+    border: 1px solid #00ff88;
+    border-top: none;
+    max-height: calc(60vh - 44px);
+  }
+  #search-results:empty { display: none; }
+
+  #search-hint {
+    background: rgba(0, 20, 10, 0.95);
+    border: 1px solid rgba(0, 255, 136, 0.3);
+    border-top: none;
+    padding: 6px 16px;
+    font-size: 11px;
+    color: rgba(0, 255, 136, 0.4);
+    display: none;
+    line-spacing: 1.4;
+  }
+  #search-hint.active { display: block; }
+  #search-hint kbd {
+    background: rgba(0, 255, 136, 0.1);
+    border: 1px solid rgba(0, 255, 136, 0.25);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 10px;
+  }
+
+  #search-completions {
+    background: rgba(0, 20, 10, 0.95);
+    border: 1px solid rgba(0, 255, 136, 0.5);
+    border-top: none;
+    max-height: 180px;
+    overflow-y: auto;
+    display: none;
+  }
+  #search-completions.active { display: block; }
+  .sc-item {
+    padding: 5px 16px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    color: #00ff88;
+  }
+  .sc-item.selected {
+    background: rgba(0, 255, 136, 0.15);
+  }
+  .sc-item:hover {
+    background: rgba(0, 255, 136, 0.1);
+  }
+  .sc-item .sc-value { opacity: 0.9; }
+  .sc-item .sc-label {
+    font-size: 10px;
+    opacity: 0.4;
+    margin-left: auto;
+  }
+  #search-ghost {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    padding: 12px 16px;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
+    font-size: 16px;
+    color: rgba(0, 255, 136, 0.2);
+    pointer-events: none;
+    white-space: pre;
+    overflow: hidden;
+  }
+
+  .search-result {
+    padding: 8px 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    border-bottom: 1px solid rgba(0, 255, 136, 0.1);
+  }
+  .search-result:last-child { border-bottom: none; }
+  .search-result:hover, .search-result.selected {
+    background: rgba(0, 255, 136, 0.12);
+  }
+  .search-result .sr-kind {
+    font-size: 10px;
+    opacity: 0.5;
+    min-width: 70px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .search-result .sr-name { font-size: 14px; }
+  .search-result .sr-detail {
+    font-size: 11px;
+    opacity: 0.5;
+    margin-left: auto;
+  }
+  .search-result .sr-status {
+    font-size: 11px;
+    margin-left: 6px;
+  }
 </style>
 </head>
 <body>
@@ -110,6 +252,17 @@
 <div id="tooltip"></div>
 <div id="controls-hint">WASD/Arrows: Move &middot; Mouse: Look &middot; Shift: Fast &middot; Space/Ctrl: Up/Down &middot; Click: Lock cursor &middot; Esc: Unlock &middot; E: Eagle Eye</div>
 <div id="loading">CONNECTING TO CLUSTER...</div>
+<div id="search-overlay">
+  <div id="search-box">
+    <div id="search-input-wrap">
+      <input id="search-input" type="text" placeholder="Search... (kind: ns: status: node: -l key=val /regex/)" autocomplete="off" spellcheck="false">
+      <div id="search-ghost"></div>
+    </div>
+    <div id="search-completions"></div>
+    <div id="search-hint"></div>
+    <div id="search-results"></div>
+  </div>
+</div>
 <canvas id="canvas"></canvas>
 
 <script type="importmap">

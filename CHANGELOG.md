@@ -4,6 +4,10 @@ All notable changes to `k8s-unix-system` are documented in this file.
 
 ## Unreleased
 
+- Add advanced search filtering with `kind:`, `ns:`, `status:`, `node:`, `-l` label selectors, and `/regex/` support.
+- Add fuzzy matching and relevance-ranked search results.
+- Add inline autocomplete with ghost text and cycling for all filter types.
+
 ## [1.0.0] - 2026-03-14
 
 - Add Ingress resource support with live watch/refresh from the networking.v1 API.
