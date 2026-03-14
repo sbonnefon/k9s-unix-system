@@ -6,11 +6,7 @@ A 3D Kubernetes resource viewer inspired by the FSN (File System Navigator) from
 
 ## Demo
 
-Current demo video:
-
-https://github.com/user-attachments/assets/6817074a-63dc-4ffc-b991-aa2436c1c5b1
-
-If you cannot view the video, here are a couple of screenshots:
+![Demo](assets/demo.gif)
 
 <p align="center">
   <img src="assets/screen1.png" alt="Screenshot 1" width="49%" />
