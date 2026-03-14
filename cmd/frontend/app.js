@@ -536,10 +536,10 @@ function nodeBlockMaterial(status) {
 }
 
 // ── Text Labels (canvas texture → flat on ground) ─────────────
-function makeLabel(text, fontSize = 64, worldHeight = 2.5, opacity = 0.9) {
+function makeLabel(text, fontSize = 64, worldHeight = 2.5, opacity = 0.9, fontFamily = "'Share Tech Mono', monospace", fontWeight = '400') {
   const cvs = document.createElement('canvas');
   const ctx = cvs.getContext('2d');
-  const fontStr = `${fontSize}px 'Share Tech Mono', monospace`;
+  const fontStr = `${fontWeight} ${fontSize}px ${fontFamily}`;
   ctx.font = fontStr;
   const metrics = ctx.measureText(text);
   cvs.width = Math.ceil(metrics.width) + 20;
@@ -733,7 +733,7 @@ function layoutNamespaces() {
       ns.group.remove(ns.label);
       disposeMesh(ns.label);
     }
-    ns.label = makeLabel(entry.nsName.toUpperCase(), 64, 1.8, 0.82);
+    ns.label = makeLabel(entry.nsName.toUpperCase(), 64, 1.8, 0.82, "'Smooch Sans', sans-serif", '300');
     ns.label.position.set(0, 0.15, entry.platDepth / 2 + 2);
     ns.group.add(ns.label);
 
@@ -778,7 +778,7 @@ function layoutNamespaces() {
       const workloadX = wlColCenters[col] - wlTotalWidth / 2;
       const workloadZ = wlRowCenters[row] - wlTotalDepth / 2;
 
-      const label = makeLabel(`${workload.kind.toUpperCase()}/${workload.name}`, 30, 0.95, 0.58);
+      const label = makeLabel(`${workload.kind.toUpperCase()}/${workload.name}`, 30, 0.95, 0.58, "'Smooch Sans', sans-serif", '300');
       label.position.set(
         workloadX,
         0.14,
@@ -1001,7 +1001,7 @@ function layoutNodeIsland() {
     island.group.remove(island.label);
     disposeMesh(island.label);
   }
-  island.label = makeLabel('NODES', 64, 1.8, 0.82);
+  island.label = makeLabel('NODES', 64, 1.8, 0.82, "'Smooch Sans', sans-serif", '300');
   island.label.position.set(0, 0.15, platDepth / 2 + 2);
   island.group.add(island.label);
 
