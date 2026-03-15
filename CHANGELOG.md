@@ -4,6 +4,11 @@ All notable changes to `k8s-unix-system` are documented in this file.
 
 ## Unreleased
 
+## [1.2.0] - 2026-03-15
+
+- Rename binary to `kube3d` and publish to Homebrew (`brew install jlandersen/tap/kube3d`).
+- Add cross-platform release builds via GoReleaser (linux, macOS, Windows).
+- Add `--version` flag.
 - Add details side panel for selected resources (pod, node, workload, service, ingress).
 - Fix search selection for ingresses now flies to and spotlights the ingress marker.
 - Simplify ingress connector lines with a trunk-and-branch layout instead of individual lines per pod.
