@@ -15,6 +15,65 @@ const state = {
   ingressLines: null,    // THREE.Group holding ingress->service arcs
 };
 
+// ── Problem Filters ────────────────────────────────────────────
+const problemFilter = { active: null }; // null or 'unhealthy' | 'crashloop' | 'unscheduled'
+
+const HEALTHY_STATUSES = new Set(['Running', 'Succeeded']);
+const CRASHLOOP_STATUSES = new Set(['CrashLoopBackOff', 'ImagePullBackOff']);
+
+function podMatchesFilter(pod, filter) {
+  switch (filter) {
+    case 'unhealthy':
+      return !HEALTHY_STATUSES.has(pod.status);
+    case 'crashloop':
+      return CRASHLOOP_STATUSES.has(pod.status) || pod.restarts > 0;
+    case 'unscheduled':
+      return pod.status === 'Pending' || !pod.ready;
+    default:
+      return true;
+  }
+}
+
+function nodeMatchesFilter(node, filter) {
+  if (filter === 'unhealthy') return node.status !== 'Ready';
+  return false;
+}
+
+function countProblems() {
+  const counts = { unhealthy: 0, crashloop: 0, unscheduled: 0 };
+  for (const [, ns] of state.namespaces) {
+    for (const [, mesh] of ns.pods) {
+      const pod = mesh.userData.pod;
+      if (!pod) continue;
+      if (!HEALTHY_STATUSES.has(pod.status)) counts.unhealthy++;
+      if (CRASHLOOP_STATUSES.has(pod.status) || pod.restarts > 0) counts.crashloop++;
+      if (pod.status === 'Pending' || !pod.ready) counts.unscheduled++;
+    }
+  }
+  return counts;
+}
+
+function updateProblemFilterUI() {
+  const counts = countProblems();
+  for (const btn of document.querySelectorAll('.pf-btn')) {
+    const filter = btn.dataset.filter;
+    const countEl = btn.querySelector('.pf-count');
+    const c = counts[filter] || 0;
+    countEl.textContent = c > 0 ? `(${c})` : '';
+    btn.classList.toggle('active', problemFilter.active === filter);
+  }
+}
+
+function toggleProblemFilter(filter) {
+  problemFilter.active = problemFilter.active === filter ? null : filter;
+  updateProblemFilterUI();
+  _lastDepthCamPos.set(Infinity, Infinity, Infinity); // force opacity recalc
+}
+
+document.querySelectorAll('.pf-btn').forEach(btn => {
+  btn.addEventListener('click', () => toggleProblemFilter(btn.dataset.filter));
+});
+
 let searchOpen = false;
 let searchSelectedIdx = -1;
 let searchItems = [];
@@ -1558,6 +1617,7 @@ function updateHUD() {
   document.getElementById('node-count').textContent = state.nodes.size;
   document.getElementById('svc-count').textContent = state.services.length;
   document.getElementById('ingress-count').textContent = state.ingresses.length;
+  updateProblemFilterUI();
 }
 
 // ── WebSocket ──────────────────────────────────────────────────
@@ -1844,6 +1904,17 @@ document.addEventListener('keydown', (e) => {
   // Toggle Eagle Eye with E key
   if (e.code === 'KeyE' && !e.repeat) {
     toggleEagleEye();
+    return;
+  }
+
+  // Cycle problem filters with F key
+  if (e.code === 'KeyF' && !e.repeat) {
+    const filters = [null, 'unhealthy', 'crashloop', 'unscheduled'];
+    const idx = filters.indexOf(problemFilter.active);
+    const next = filters[(idx + 1) % filters.length];
+    problemFilter.active = next;
+    updateProblemFilterUI();
+    _lastDepthCamPos.set(Infinity, Infinity, Infinity);
     return;
   }
 
@@ -2210,6 +2281,8 @@ function updateDepthTransparency() {
   if (_lastDepthCamPos.distanceToSquared(camPos) < 0.01) return;
   _lastDepthCamPos.copy(camPos);
 
+  const pf = problemFilter.active;
+
   for (const [, ns] of state.namespaces) {
     ns.group.getWorldPosition(_depthTmpVec);
     const dist = eagleEye.active ? 0 : camPos.distanceTo(_depthTmpVec);
@@ -2219,7 +2292,8 @@ function updateDepthTransparency() {
     if (ns.label) ns.label.material.opacity = BASE_LABEL_OPACITY * f;
 
     for (const [, mesh] of ns.pods) {
-      mesh.material.opacity = BASE_POD_OPACITY * f;
+      const dimmed = pf && !podMatchesFilter(mesh.userData.pod, pf);
+      mesh.material.opacity = (dimmed ? 0.06 : BASE_POD_OPACITY) * f;
     }
   }
 
@@ -2231,7 +2305,9 @@ function updateDepthTransparency() {
     if (state.nodeIsland.platform) state.nodeIsland.platform.material.opacity = BASE_PLATFORM_OPACITY * f;
     if (state.nodeIsland.label) state.nodeIsland.label.material.opacity = BASE_LABEL_OPACITY * f;
     for (const [, mesh] of state.nodeIsland.blocks) {
-      mesh.material.opacity = BASE_POD_OPACITY * f;
+      const node = mesh.userData.node;
+      const dimmed = pf && !nodeMatchesFilter(node, pf);
+      mesh.material.opacity = (dimmed ? 0.06 : BASE_POD_OPACITY) * f;
     }
   }
 }

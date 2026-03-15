@@ -53,6 +53,42 @@
   #tooltip .status-pending { color: #ffcc00; }
   #tooltip .status-error { color: #ff4444; }
 
+  #problem-filters {
+    position: fixed;
+    top: 58px;
+    left: 16px;
+    z-index: 10;
+    display: flex;
+    gap: 6px;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
+  }
+  .pf-btn {
+    background: rgba(0, 20, 10, 0.7);
+    border: 1px solid rgba(0, 255, 136, 0.25);
+    color: rgba(0, 255, 136, 0.5);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+    transition: all 0.15s ease;
+  }
+  .pf-btn:hover {
+    border-color: rgba(0, 255, 136, 0.5);
+    color: rgba(0, 255, 136, 0.7);
+  }
+  .pf-btn.active {
+    border-color: #00ff88;
+    color: #00ff88;
+    background: rgba(0, 255, 136, 0.12);
+    text-shadow: 0 0 6px #00ff88;
+  }
+  .pf-btn .pf-count {
+    margin-left: 4px;
+    opacity: 0.6;
+  }
+  .pf-btn.active .pf-count { opacity: 0.8; }
+
   #controls-hint {
     position: fixed;
     bottom: 16px;
@@ -367,8 +403,13 @@
   </div>
 </div>
 <div id="tooltip"></div>
+<div id="problem-filters">
+  <button class="pf-btn" data-filter="unhealthy">UNHEALTHY<span class="pf-count"></span></button>
+  <button class="pf-btn" data-filter="crashloop">CRASHLOOP<span class="pf-count"></span></button>
+  <button class="pf-btn" data-filter="unscheduled">PENDING<span class="pf-count"></span></button>
+</div>
 <div id="detail-panel"></div>
-<div id="controls-hint">WASD/Arrows: Move &middot; Mouse: Look &middot; Shift: Fast &middot; Space/Ctrl: Up/Down &middot; Click: Lock cursor &middot; Esc: Unlock &middot; E: Eagle Eye</div>
+<div id="controls-hint">WASD/Arrows: Move &middot; Mouse: Look &middot; Shift: Fast &middot; Space/Ctrl: Up/Down &middot; Click: Lock cursor &middot; Esc: Unlock &middot; E: Eagle Eye &middot; F: Problem Filter</div>
 <div id="loading">CONNECTING TO CLUSTER...</div>
 <div id="search-overlay">
   <div id="search-box">
