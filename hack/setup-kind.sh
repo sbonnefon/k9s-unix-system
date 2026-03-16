@@ -450,6 +450,99 @@ echo ""
 echo "⏳ Waiting for pods to be ready..."
 kubectl wait --for=condition=available deployment --all --all-namespaces --timeout=120s 2>/dev/null || true
 
+# ── Restricted user: monitoring-viewer ─────────────────────────
+VIEWER_NS="monitoring"
+VIEWER_SA="monitoring-viewer"
+KUBECONFIG_OUT="$(cd "$(dirname "$0")" && pwd)/monitoring-viewer.kubeconfig"
+
+echo ""
+echo "🔒 Creating restricted user '${VIEWER_SA}' scoped to namespace '${VIEWER_NS}'..."
+
+kubectl apply -f - <<'RBAC'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: monitoring-viewer
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: namespace-viewer
+  namespace: monitoring
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints", "configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: monitoring-viewer-binding
+  namespace: monitoring
+subjects:
+- kind: ServiceAccount
+  name: monitoring-viewer
+  namespace: monitoring
+roleRef:
+  kind: Role
+  name: namespace-viewer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: monitoring-viewer-token
+  namespace: monitoring
+  annotations:
+    kubernetes.io/service-account.name: monitoring-viewer
+type: kubernetes.io/service-account-token
+RBAC
+
+echo "Waiting for token to be populated..."
+for i in $(seq 1 10); do
+  TOKEN=$(kubectl get secret monitoring-viewer-token -n monitoring -o jsonpath='{.data.token}' 2>/dev/null || true)
+  if [ -n "$TOKEN" ]; then break; fi
+  sleep 1
+done
+
+TOKEN=$(echo "$TOKEN" | base64 --decode)
+CA=$(kubectl get secret monitoring-viewer-token -n monitoring -o jsonpath='{.data.ca\.crt}')
+SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+
+cat > "$KUBECONFIG_OUT" <<KUBECONFIG
+apiVersion: v1
+kind: Config
+clusters:
+- name: kind-${CLUSTER_NAME}
+  cluster:
+    certificate-authority-data: ${CA}
+    server: ${SERVER}
+contexts:
+- name: monitoring-viewer
+  context:
+    cluster: kind-${CLUSTER_NAME}
+    namespace: ${VIEWER_NS}
+    user: ${VIEWER_SA}
+current-context: monitoring-viewer
+users:
+- name: ${VIEWER_SA}
+  user:
+    token: ${TOKEN}
+KUBECONFIG
+
+echo "Kubeconfig written to: ${KUBECONFIG_OUT}"
+
 echo ""
 echo "📊 Cluster state:"
 kubectl get pods --all-namespaces --no-headers | awk '{print $1}' | sort | uniq -c | sort -rn
@@ -460,3 +553,6 @@ echo "Ingresses:  $(kubectl get ingress --all-namespaces --no-headers 2>/dev/nul
 echo ""
 echo "✅ Ready! Run:"
 echo "  kube3d --context kind-${CLUSTER_NAME}"
+echo ""
+echo "  Or test with restricted user (monitoring namespace only):"
+echo "  kube3d --kubeconfig ${KUBECONFIG_OUT}"

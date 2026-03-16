@@ -99,8 +99,9 @@ type Event struct {
 }
 
 type Watcher struct {
-	clientset  *kubernetes.Clientset
-	namespace  string // if set, scope all watches to this namespace
+	clientset       *kubernetes.Clientset
+	namespace       string // if set, scope all watches to this namespace
+	configNamespace string // namespace from kubeconfig context, used as fallback
 	mu         sync.RWMutex
 	namespaces map[string]*NamespaceInfo
 	pods       map[string]map[string]*PodInfo // ns -> pod name -> pod
@@ -124,10 +125,13 @@ func NewWatcher(kubeconfig, kubecontext, namespace string) (*Watcher, error) {
 	if kubecontext != "" {
 		overrides.CurrentContext = kubecontext
 	}
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides)
+	config, err := clientConfig.ClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("k8s config: %w", err)
 	}
+
+	configNamespace, _, _ := clientConfig.Namespace()
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
@@ -135,8 +139,9 @@ func NewWatcher(kubeconfig, kubecontext, namespace string) (*Watcher, error) {
 	}
 
 	return &Watcher{
-		clientset:  clientset,
-		namespace:  namespace,
+		clientset:       clientset,
+		namespace:       namespace,
+		configNamespace: configNamespace,
 		namespaces: make(map[string]*NamespaceInfo),
 		pods:       make(map[string]map[string]*PodInfo),
 		nodes:      make(map[string]*NodeInfo),
@@ -244,13 +249,22 @@ func (w *Watcher) Start(ctx context.Context) error {
 	} else {
 		nsList, err := w.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return fmt.Errorf("list namespaces: %w", err)
-		}
-		nsResourceVersion = nsList.ResourceVersion
-		for i := range nsList.Items {
-			n := &nsList.Items[i]
-			namespaces[n.Name] = &NamespaceInfo{Name: n.Name, Status: string(n.Status.Phase)}
-			pods[n.Name] = make(map[string]*PodInfo)
+			if w.configNamespace != "" {
+				log.Printf("Cannot list namespaces, falling back to kubeconfig namespace %q: %v", w.configNamespace, err)
+				ns = w.configNamespace
+				w.namespace = ns
+				namespaces[ns] = &NamespaceInfo{Name: ns, Status: "Active"}
+				pods[ns] = make(map[string]*PodInfo)
+			} else {
+				return fmt.Errorf("list namespaces: %w", err)
+			}
+		} else {
+			nsResourceVersion = nsList.ResourceVersion
+			for i := range nsList.Items {
+				n := &nsList.Items[i]
+				namespaces[n.Name] = &NamespaceInfo{Name: n.Name, Status: string(n.Status.Phase)}
+				pods[n.Name] = make(map[string]*PodInfo)
+			}
 		}
 	}
 
@@ -269,14 +283,16 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 	// Nodes are cluster-scoped; skip if we don't have permission
 	nodes := make(map[string]*NodeInfo)
+	var nodesResourceVersion string
 	nodeList, err := w.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		if ns != "" {
-			log.Printf("Skipping nodes (no cluster-scope permission): %v", err)
+			log.Printf("Skipping nodes (no cluster-scope permission)")
 		} else {
 			return fmt.Errorf("list nodes: %w", err)
 		}
 	} else {
+		nodesResourceVersion = nodeList.ResourceVersion
 		for i := range nodeList.Items {
 			node := &nodeList.Items[i]
 			info := nodeToInfo(node)
@@ -334,8 +350,8 @@ func (w *Watcher) Start(ctx context.Context) error {
 		go w.watchNamespaces(ctx, nsResourceVersion)
 	}
 	go w.watchPods(ctx, podList.ResourceVersion)
-	if nodeList != nil {
-		go w.watchNodes(ctx, nodeList.ResourceVersion)
+	if nodesResourceVersion != "" {
+		go w.watchNodes(ctx, nodesResourceVersion)
 	}
 	go w.watchServices(ctx, svcList.ResourceVersion)
 	go w.watchIngresses(ctx, ingList.ResourceVersion)

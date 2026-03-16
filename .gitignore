@@ -30,6 +30,9 @@ go.work.sum
 # env file
 .env
 
+# Generated kubeconfigs
+*.kubeconfig
+
 # Editor/IDE
 # .idea/
 # .vscode/
