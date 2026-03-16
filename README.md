@@ -59,6 +59,12 @@ kube3d
 # Specify a context
 kube3d --context my-cluster
 
+# Use a specific kubeconfig file
+kube3d --kubeconfig /path/to/kubeconfig
+
+# Watch a single namespace (works with restricted RBAC)
+kube3d -n my-namespace
+
 # Custom port, don't open browser
 kube3d --port 9090 --no-browser
 ```
@@ -121,5 +127,7 @@ Ingresses appear as orange diamond markers on the front edge of namespace platfo
 | Flag | Default | Description |
 |---|---|---|
 | `--context` | current | Kubernetes context |
+| `--kubeconfig` | `~/.kube/config` | Path to kubeconfig file (also respects `KUBECONFIG` env var) |
+| `--namespace`, `-n` | all | Scope all watches to a single namespace (useful with restricted RBAC) |
 | `--port` | 8080 | HTTP server port |
 | `--no-browser` | false | Don't auto-open browser |
