@@ -100,6 +100,7 @@ type Event struct {
 
 type Watcher struct {
 	clientset  *kubernetes.Clientset
+	namespace  string // if set, scope all watches to this namespace
 	mu         sync.RWMutex
 	namespaces map[string]*NamespaceInfo
 	pods       map[string]map[string]*PodInfo // ns -> pod name -> pod
@@ -114,8 +115,11 @@ type Watcher struct {
 
 const watchRetryDelay = 2 * time.Second
 
-func NewWatcher(kubecontext string) (*Watcher, error) {
+func NewWatcher(kubeconfig, kubecontext, namespace string) (*Watcher, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfig != "" {
+		rules.ExplicitPath = kubeconfig
+	}
 	overrides := &clientcmd.ConfigOverrides{}
 	if kubecontext != "" {
 		overrides.CurrentContext = kubecontext
@@ -132,6 +136,7 @@ func NewWatcher(kubecontext string) (*Watcher, error) {
 
 	return &Watcher{
 		clientset:  clientset,
+		namespace:  namespace,
 		namespaces: make(map[string]*NamespaceInfo),
 		pods:       make(map[string]map[string]*PodInfo),
 		nodes:      make(map[string]*NodeInfo),
@@ -227,40 +232,31 @@ func (w *Watcher) SnapshotIngresses() []IngressInfo {
 }
 
 func (w *Watcher) Start(ctx context.Context) error {
-	// Initial list
-	nsList, err := w.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("list namespaces: %w", err)
-	}
-	podList, err := w.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("list pods: %w", err)
-	}
-	nodeList, err := w.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("list nodes: %w", err)
-	}
-	svcList, err := w.clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("list services: %w", err)
-	}
-	ingList, err := w.clientset.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("list ingresses: %w", err)
-	}
-	if err := w.refreshReplicaSetOwners(ctx); err != nil {
-		return fmt.Errorf("list replica sets: %w", err)
-	}
-	if err := w.refreshWorkloads(ctx); err != nil {
-		return fmt.Errorf("list workloads: %w", err)
+	ns := w.namespace // empty string means all namespaces
+
+	// Initial namespace list
+	var nsResourceVersion string
+	namespaces := make(map[string]*NamespaceInfo)
+	pods := make(map[string]map[string]*PodInfo)
+	if ns != "" {
+		namespaces[ns] = &NamespaceInfo{Name: ns, Status: "Active"}
+		pods[ns] = make(map[string]*PodInfo)
+	} else {
+		nsList, err := w.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return fmt.Errorf("list namespaces: %w", err)
+		}
+		nsResourceVersion = nsList.ResourceVersion
+		for i := range nsList.Items {
+			n := &nsList.Items[i]
+			namespaces[n.Name] = &NamespaceInfo{Name: n.Name, Status: string(n.Status.Phase)}
+			pods[n.Name] = make(map[string]*PodInfo)
+		}
 	}
 
-	namespaces := make(map[string]*NamespaceInfo, len(nsList.Items))
-	pods := make(map[string]map[string]*PodInfo, len(nsList.Items))
-	for i := range nsList.Items {
-		ns := &nsList.Items[i]
-		namespaces[ns.Name] = &NamespaceInfo{Name: ns.Name, Status: string(ns.Status.Phase)}
-		pods[ns.Name] = make(map[string]*PodInfo)
+	podList, err := w.clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list pods: %w", err)
 	}
 	for i := range podList.Items {
 		pod := &podList.Items[i]
@@ -271,11 +267,36 @@ func (w *Watcher) Start(ctx context.Context) error {
 		pods[pod.Namespace][pod.Name] = &info
 	}
 
-	nodes := make(map[string]*NodeInfo, len(nodeList.Items))
-	for i := range nodeList.Items {
-		node := &nodeList.Items[i]
-		info := nodeToInfo(node)
-		nodes[node.Name] = &info
+	// Nodes are cluster-scoped; skip if we don't have permission
+	nodes := make(map[string]*NodeInfo)
+	nodeList, err := w.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if ns != "" {
+			log.Printf("Skipping nodes (no cluster-scope permission): %v", err)
+		} else {
+			return fmt.Errorf("list nodes: %w", err)
+		}
+	} else {
+		for i := range nodeList.Items {
+			node := &nodeList.Items[i]
+			info := nodeToInfo(node)
+			nodes[node.Name] = &info
+		}
+	}
+
+	svcList, err := w.clientset.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list services: %w", err)
+	}
+	ingList, err := w.clientset.NetworkingV1().Ingresses(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list ingresses: %w", err)
+	}
+	if err := w.refreshReplicaSetOwners(ctx); err != nil {
+		return fmt.Errorf("list replica sets: %w", err)
+	}
+	if err := w.refreshWorkloads(ctx); err != nil {
+		return fmt.Errorf("list workloads: %w", err)
 	}
 
 	services := make(map[string]map[string]*ServiceInfo)
@@ -309,9 +330,13 @@ func (w *Watcher) Start(ctx context.Context) error {
 	// Send initial snapshot
 	w.emitSnapshot()
 
-	go w.watchNamespaces(ctx, nsList.ResourceVersion)
+	if ns == "" {
+		go w.watchNamespaces(ctx, nsResourceVersion)
+	}
 	go w.watchPods(ctx, podList.ResourceVersion)
-	go w.watchNodes(ctx, nodeList.ResourceVersion)
+	if nodeList != nil {
+		go w.watchNodes(ctx, nodeList.ResourceVersion)
+	}
 	go w.watchServices(ctx, svcList.ResourceVersion)
 	go w.watchIngresses(ctx, ingList.ResourceVersion)
 	go w.pollWorkloads(ctx)
@@ -390,7 +415,7 @@ func (w *Watcher) pollWorkloads(ctx context.Context) {
 }
 
 func (w *Watcher) refreshReplicaSetOwners(ctx context.Context) error {
-	rsList, err := w.clientset.AppsV1().ReplicaSets("").List(ctx, metav1.ListOptions{})
+	rsList, err := w.clientset.AppsV1().ReplicaSets(w.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -417,23 +442,23 @@ func (w *Watcher) refreshReplicaSetOwners(ctx context.Context) error {
 }
 
 func (w *Watcher) refreshWorkloads(ctx context.Context) error {
-	deployments, err := w.clientset.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
+	deployments, err := w.clientset.AppsV1().Deployments(w.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
-	statefulsets, err := w.clientset.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{})
+	statefulsets, err := w.clientset.AppsV1().StatefulSets(w.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
-	daemonsets, err := w.clientset.AppsV1().DaemonSets("").List(ctx, metav1.ListOptions{})
+	daemonsets, err := w.clientset.AppsV1().DaemonSets(w.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
-	jobs, err := w.clientset.BatchV1().Jobs("").List(ctx, metav1.ListOptions{})
+	jobs, err := w.clientset.BatchV1().Jobs(w.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
-	cronjobs, err := w.clientset.BatchV1().CronJobs("").List(ctx, metav1.ListOptions{})
+	cronjobs, err := w.clientset.BatchV1().CronJobs(w.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -506,7 +531,7 @@ func (w *Watcher) refreshNamespaces(ctx context.Context) (string, error) {
 }
 
 func (w *Watcher) refreshPods(ctx context.Context) (string, error) {
-	podList, err := w.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	podList, err := w.clientset.CoreV1().Pods(w.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("list pods: %w", err)
 	}
@@ -550,7 +575,7 @@ func (w *Watcher) refreshNodes(ctx context.Context) (string, error) {
 }
 
 func (w *Watcher) refreshServices(ctx context.Context) (string, error) {
-	svcList, err := w.clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	svcList, err := w.clientset.CoreV1().Services(w.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("list services: %w", err)
 	}
@@ -572,7 +597,7 @@ func (w *Watcher) refreshServices(ctx context.Context) (string, error) {
 }
 
 func (w *Watcher) refreshIngresses(ctx context.Context) (string, error) {
-	ingList, err := w.clientset.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{})
+	ingList, err := w.clientset.NetworkingV1().Ingresses(w.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("list ingresses: %w", err)
 	}
@@ -689,7 +714,7 @@ func (w *Watcher) watchPods(ctx context.Context, rv string) {
 		default:
 		}
 
-		watcher, err := w.clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{ResourceVersion: rv})
+		watcher, err := w.clientset.CoreV1().Pods(w.namespace).Watch(ctx, metav1.ListOptions{ResourceVersion: rv})
 		if err != nil {
 			if ctx.Err() != nil || w.isStopped() {
 				return
@@ -1094,7 +1119,7 @@ func (w *Watcher) watchServices(ctx context.Context, rv string) {
 		default:
 		}
 
-		watcher, err := w.clientset.CoreV1().Services("").Watch(ctx, metav1.ListOptions{ResourceVersion: rv})
+		watcher, err := w.clientset.CoreV1().Services(w.namespace).Watch(ctx, metav1.ListOptions{ResourceVersion: rv})
 		if err != nil {
 			if ctx.Err() != nil || w.isStopped() {
 				return
@@ -1177,7 +1202,7 @@ func (w *Watcher) watchIngresses(ctx context.Context, rv string) {
 		default:
 		}
 
-		watcher, err := w.clientset.NetworkingV1().Ingresses("").Watch(ctx, metav1.ListOptions{ResourceVersion: rv})
+		watcher, err := w.clientset.NetworkingV1().Ingresses(w.namespace).Watch(ctx, metav1.ListOptions{ResourceVersion: rv})
 		if err != nil {
 			if ctx.Err() != nil || w.isStopped() {
 				return

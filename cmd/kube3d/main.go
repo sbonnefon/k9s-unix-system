@@ -26,7 +26,10 @@ var frontendFiles embed.FS
 var version = "dev"
 
 func main() {
+	kubeconfig := flag.String("kubeconfig", "", "Path to kubeconfig file (default: ~/.kube/config or KUBECONFIG env)")
 	kubecontext := flag.String("context", "", "Kubernetes context to use (default: current context)")
+	namespace := flag.String("namespace", "", "Kubernetes namespace to scope to (default: all namespaces)")
+	flag.StringVar(namespace, "n", "", "Short for --namespace")
 	host := flag.String("host", "127.0.0.1", "Host interface to bind the HTTP server to")
 	port := flag.Int("port", 8080, "Port to serve on")
 	noBrowser := flag.Bool("no-browser", false, "Don't open browser automatically")
@@ -41,7 +44,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	watcher, err := k8swatch.NewWatcher(*kubecontext)
+	watcher, err := k8swatch.NewWatcher(*kubeconfig, *kubecontext, *namespace)
 	if err != nil {
 		log.Fatalf("Failed to create k8s watcher: %v", err)
 	}
@@ -62,7 +65,11 @@ func main() {
 	addr := net.JoinHostPort(*host, strconv.Itoa(*port))
 	url := fmt.Sprintf("http://%s", net.JoinHostPort(browserHost(*host), strconv.Itoa(*port)))
 
-	log.Printf("🦖 K8s Unix System starting on %s", url)
+	if *namespace != "" {
+		log.Printf("🦖 K8s Unix System starting on %s (namespace: %s)", url, *namespace)
+	} else {
+		log.Printf("🦖 K8s Unix System starting on %s", url)
+	}
 	if !*noBrowser {
 		go openBrowser(url)
 	}
