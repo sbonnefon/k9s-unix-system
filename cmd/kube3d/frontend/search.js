@@ -1,7 +1,7 @@
 import { state, uiState, podWorkload, workloadKey } from './state.js';
 import { eagleEye } from './scene.js';
 import { startFlyTo, toggleEagleEye, flyTo } from './camera-controller.js';
-import { showWorkloadDetail, showServiceDetail, showIngressDetail } from './detail-panel.js';
+import { showWorkloadDetail, showServiceDetail, showIngressDetail, showPodDetail, showNodeDetail } from './detail-panel.js';
 
 // ── DOM Elements ───────────────────────────────────────────────
 const searchOverlay = document.getElementById('search-overlay');
@@ -75,6 +75,17 @@ function buildSearchIndex() {
     });
   }
 
+  for (const evt of state.k8sEvents) {
+    items.push({
+      kind: 'event', name: evt.reason,
+      detail: `${evt.involvedObjectKind}/${evt.involvedObjectName} · ns/${evt.namespace}`,
+      status: evt.type === 'Warning' ? 'Failed' : 'Running',
+      ns: evt.namespace, labels: {}, nodeName: '',
+      k8sEvent: evt,
+      searchText: `${evt.reason} ${evt.message} ${evt.involvedObjectName} ${evt.namespace}`,
+    });
+  }
+
   for (const item of items) {
     if (!item.searchText) item.searchText = `${item.name} ${item.detail}`;
     item.searchText = item.searchText.toLowerCase();
@@ -132,6 +143,7 @@ const KIND_ALIASES = {
   ing: 'ingress', ingress: 'ingress', ingresses: 'ingress',
   no: 'node', node: 'node', nodes: 'node',
   ns: 'namespace', namespace: 'namespace', namespaces: 'namespace',
+  ev: 'event', event: 'event', events: 'event',
 };
 
 function parseSearchQuery(raw) {
@@ -352,6 +364,29 @@ function selectSearchResult(item) {
     flyTo.targetNs = null;
     const svc = state.services.find(s => s.name === item.name && s.namespace === item.ns);
     if (svc) showServiceDetail(svc);
+  } else if (item.kind === 'event' && item.k8sEvent) {
+    const evt = item.k8sEvent;
+    if (evt.involvedObjectKind === 'Pod') {
+      const ns = state.namespaces.get(evt.namespace);
+      if (ns) {
+        const podMesh = ns.pods.get(evt.involvedObjectName);
+        if (podMesh) {
+          flyTo.targetResource = podMesh;
+          startFlyTo(evt.namespace);
+          showPodDetail(podMesh.userData.pod);
+          return;
+        }
+      }
+    } else if (evt.involvedObjectKind === 'Node') {
+      const nodeBlock = state.nodeIsland?.blocks.get(evt.involvedObjectName);
+      if (nodeBlock) {
+        flyTo.targetResource = nodeBlock;
+        startFlyTo('__nodes__');
+        showNodeDetail(nodeBlock.userData.node);
+        return;
+      }
+    }
+    startFlyTo(evt.namespace || '__nodes__');
   } else if (item.kind === 'ingress') {
     const ing = state.ingresses.find(i => i.name === item.name && i.namespace === item.ns);
     if (ing) {
@@ -384,6 +419,7 @@ const KIND_COMPLETIONS = [
   { value: 'ingress', label: 'Ingresses' },
   { value: 'node', label: 'Nodes' },
   { value: 'namespace', label: 'Namespaces' },
+  { value: 'event', label: 'Events' },
 ];
 
 function getCompletionContext(text, cursorPos) {

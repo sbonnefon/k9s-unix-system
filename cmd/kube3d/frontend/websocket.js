@@ -43,6 +43,7 @@ function handleEvent(event) {
       }
       state.services = event.services ?? [];
       state.ingresses = event.ingresses ?? [];
+      state.k8sEvents = event.k8sEvents ?? [];
       layoutNamespaces();
       rebuildServiceLines();
       rebuildIngressLines();
@@ -127,6 +128,22 @@ function handleEvent(event) {
         state.ingresses = state.ingresses.filter(i => !(i.name === event.ingress.name && i.namespace === event.ingress.namespace));
       }
       rebuildIngressLines();
+      updateHUD();
+      break;
+
+    case 'k8s_event_added':
+      if (event.k8sEvent) {
+        const idx = state.k8sEvents.findIndex(e => e.name === event.k8sEvent.name && e.namespace === event.k8sEvent.namespace);
+        if (idx >= 0) state.k8sEvents[idx] = event.k8sEvent;
+        else state.k8sEvents.push(event.k8sEvent);
+      }
+      updateHUD();
+      break;
+
+    case 'k8s_event_deleted':
+      if (event.k8sEvent) {
+        state.k8sEvents = state.k8sEvents.filter(e => !(e.name === event.k8sEvent.name && e.namespace === event.k8sEvent.namespace));
+      }
       updateHUD();
       break;
 

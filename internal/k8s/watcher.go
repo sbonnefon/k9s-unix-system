@@ -83,6 +83,20 @@ type IngressInfo struct {
 	DefaultBackend   string            `json:"defaultBackend,omitempty"`
 }
 
+type K8sEventInfo struct {
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	Type               string `json:"type"`
+	Reason             string `json:"reason"`
+	Message            string `json:"message"`
+	InvolvedObjectKind string `json:"involvedObjectKind"`
+	InvolvedObjectName string `json:"involvedObjectName"`
+	Source             string `json:"source"`
+	Count              int32  `json:"count"`
+	FirstTimestamp     int64  `json:"firstTimestamp"`
+	LastTimestamp       int64  `json:"lastTimestamp"`
+}
+
 type Event struct {
 	Type      string          `json:"type"`
 	Namespace string          `json:"namespace,omitempty"`
@@ -94,8 +108,10 @@ type Event struct {
 	Services  []ServiceInfo   `json:"services,omitempty"`
 	Workload  *WorkloadInfo   `json:"workload,omitempty"`
 	Workloads []WorkloadInfo  `json:"workloads,omitempty"`
-	Ingress   *IngressInfo    `json:"ingress,omitempty"`
-	Ingresses []IngressInfo   `json:"ingresses,omitempty"`
+	Ingress    *IngressInfo    `json:"ingress,omitempty"`
+	Ingresses  []IngressInfo   `json:"ingresses,omitempty"`
+	K8sEvent   *K8sEventInfo   `json:"k8sEvent,omitempty"`
+	K8sEvents  []K8sEventInfo  `json:"k8sEvents,omitempty"`
 }
 
 type Watcher struct {
@@ -108,6 +124,7 @@ type Watcher struct {
 	nodes      map[string]*NodeInfo
 	services   map[string]map[string]*ServiceInfo // ns -> svc name -> svc
 	ingresses  map[string]map[string]*IngressInfo // ns -> ingress name -> ingress
+	k8sEvents  map[string]map[string]*K8sEventInfo // ns -> event name -> event
 	workloads  map[string]map[string]*WorkloadInfo
 	rsOwners   map[string]map[string]string // ns -> replicaset name -> deployment name
 	eventCh    chan Event
@@ -147,6 +164,7 @@ func NewWatcher(kubeconfig, kubecontext, namespace string) (*Watcher, error) {
 		nodes:      make(map[string]*NodeInfo),
 		services:   make(map[string]map[string]*ServiceInfo),
 		ingresses:  make(map[string]map[string]*IngressInfo),
+		k8sEvents:  make(map[string]map[string]*K8sEventInfo),
 		workloads:  make(map[string]map[string]*WorkloadInfo),
 		rsOwners:   make(map[string]map[string]string),
 		eventCh:    make(chan Event, 256),
@@ -234,6 +252,42 @@ func (w *Watcher) SnapshotIngresses() []IngressInfo {
 		}
 	}
 	return result
+}
+
+func (w *Watcher) SnapshotK8sEvents() []K8sEventInfo {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	result := make([]K8sEventInfo, 0)
+	for _, events := range w.k8sEvents {
+		for _, e := range events {
+			result = append(result, *e)
+		}
+	}
+	return result
+}
+
+func k8sEventToInfo(event *corev1.Event) K8sEventInfo {
+	info := K8sEventInfo{
+		Name:               event.Name,
+		Namespace:          event.Namespace,
+		Type:               event.Type,
+		Reason:             event.Reason,
+		Message:            event.Message,
+		InvolvedObjectKind: event.InvolvedObject.Kind,
+		InvolvedObjectName: event.InvolvedObject.Name,
+		Count:              event.Count,
+	}
+	if event.Source.Component != "" {
+		info.Source = event.Source.Component
+	}
+	if !event.FirstTimestamp.IsZero() {
+		info.FirstTimestamp = event.FirstTimestamp.Unix()
+	}
+	if !event.LastTimestamp.IsZero() {
+		info.LastTimestamp = event.LastTimestamp.Unix()
+	}
+	return info
 }
 
 func (w *Watcher) Start(ctx context.Context) error {
@@ -335,12 +389,36 @@ func (w *Watcher) Start(ctx context.Context) error {
 		ingresses[ing.Namespace][ing.Name] = &info
 	}
 
+	k8sEvents := make(map[string]map[string]*K8sEventInfo)
+	var eventsResourceVersion string
+	eventList, err := w.clientset.CoreV1().Events(ns).List(ctx, metav1.ListOptions{
+		FieldSelector: "type=Warning",
+	})
+	if err != nil {
+		log.Printf("Skipping events: %v", err)
+	} else {
+		eventsResourceVersion = eventList.ResourceVersion
+		cutoff := time.Now().Add(-30 * time.Minute).Unix()
+		for i := range eventList.Items {
+			evt := &eventList.Items[i]
+			info := k8sEventToInfo(evt)
+			if info.LastTimestamp > 0 && info.LastTimestamp < cutoff {
+				continue
+			}
+			if k8sEvents[evt.Namespace] == nil {
+				k8sEvents[evt.Namespace] = make(map[string]*K8sEventInfo)
+			}
+			k8sEvents[evt.Namespace][evt.Name] = &info
+		}
+	}
+
 	w.mu.Lock()
 	w.namespaces = namespaces
 	w.pods = pods
 	w.nodes = nodes
 	w.services = services
 	w.ingresses = ingresses
+	w.k8sEvents = k8sEvents
 	w.mu.Unlock()
 
 	// Send initial snapshot
@@ -355,6 +433,9 @@ func (w *Watcher) Start(ctx context.Context) error {
 	}
 	go w.watchServices(ctx, svcList.ResourceVersion)
 	go w.watchIngresses(ctx, ingList.ResourceVersion)
+	if eventsResourceVersion != "" {
+		go w.watchK8sEvents(ctx, eventsResourceVersion)
+	}
 	go w.pollWorkloads(ctx)
 
 	return nil
@@ -368,6 +449,7 @@ func (w *Watcher) emitSnapshot() {
 		Services:  w.SnapshotServices(),
 		Workloads: w.SnapshotWorkloads(),
 		Ingresses: w.SnapshotIngresses(),
+		K8sEvents: w.SnapshotK8sEvents(),
 	})
 }
 
@@ -697,6 +779,7 @@ func (w *Watcher) watchNamespaces(ctx context.Context, rv string) {
 				delete(w.pods, ns.Name)
 				delete(w.services, ns.Name)
 				delete(w.workloads, ns.Name)
+				delete(w.k8sEvents, ns.Name)
 				w.mu.Unlock()
 				w.emit(Event{Type: "ns_deleted", Namespace: ns.Name})
 			}
@@ -1045,6 +1128,121 @@ func ingressToInfo(ing *networkingv1.Ingress) IngressInfo {
 		info.Rules = append(info.Rules, ri)
 	}
 	return info
+}
+
+func (w *Watcher) refreshK8sEvents(ctx context.Context) (string, error) {
+	eventList, err := w.clientset.CoreV1().Events(w.namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "type=Warning",
+	})
+	if err != nil {
+		return "", fmt.Errorf("list events: %w", err)
+	}
+
+	cutoff := time.Now().Add(-30 * time.Minute).Unix()
+	newEvents := make(map[string]map[string]*K8sEventInfo)
+	for i := range eventList.Items {
+		evt := &eventList.Items[i]
+		info := k8sEventToInfo(evt)
+		if info.LastTimestamp > 0 && info.LastTimestamp < cutoff {
+			continue
+		}
+		if newEvents[evt.Namespace] == nil {
+			newEvents[evt.Namespace] = make(map[string]*K8sEventInfo)
+		}
+		newEvents[evt.Namespace][evt.Name] = &info
+	}
+
+	w.mu.Lock()
+	w.k8sEvents = newEvents
+	w.mu.Unlock()
+
+	return eventList.ResourceVersion, nil
+}
+
+func (w *Watcher) watchK8sEvents(ctx context.Context, rv string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.stopCh:
+			return
+		default:
+		}
+
+		watcher, err := w.clientset.CoreV1().Events(w.namespace).Watch(ctx, metav1.ListOptions{
+			ResourceVersion: rv,
+			FieldSelector:   "type=Warning",
+		})
+		if err != nil {
+			if ctx.Err() != nil || w.isStopped() {
+				return
+			}
+			log.Printf("event watch: %v", err)
+			if rv, err = w.refreshK8sEvents(ctx); err == nil {
+				w.emitSnapshot()
+				continue
+			}
+			if ctx.Err() != nil || w.isStopped() {
+				return
+			}
+			log.Printf("event resync: %v", err)
+			time.Sleep(watchRetryDelay)
+			continue
+		}
+
+		needsResync := false
+		for event := range watcher.ResultChan() {
+			if event.Type == k8swatch.Error {
+				needsResync = true
+				if status, ok := event.Object.(*metav1.Status); ok {
+					log.Printf("event watch error: %s", status.Message)
+				}
+				break
+			}
+
+			evt, ok := event.Object.(*corev1.Event)
+			if !ok {
+				continue
+			}
+			rv = evt.ResourceVersion
+			info := k8sEventToInfo(evt)
+
+			switch event.Type {
+			case k8swatch.Added, k8swatch.Modified:
+				w.mu.Lock()
+				if w.k8sEvents[evt.Namespace] == nil {
+					w.k8sEvents[evt.Namespace] = make(map[string]*K8sEventInfo)
+				}
+				w.k8sEvents[evt.Namespace][evt.Name] = &info
+				w.mu.Unlock()
+				w.emit(Event{Type: "k8s_event_added", Namespace: evt.Namespace, K8sEvent: &info})
+
+			case k8swatch.Deleted:
+				w.mu.Lock()
+				if w.k8sEvents[evt.Namespace] != nil {
+					delete(w.k8sEvents[evt.Namespace], evt.Name)
+				}
+				w.mu.Unlock()
+				w.emit(Event{Type: "k8s_event_deleted", Namespace: evt.Namespace, K8sEvent: &info})
+			}
+		}
+
+		watcher.Stop()
+		if ctx.Err() != nil || w.isStopped() {
+			return
+		}
+		if rv, err = w.refreshK8sEvents(ctx); err != nil {
+			if ctx.Err() != nil || w.isStopped() {
+				return
+			}
+			if needsResync {
+				log.Printf("event resync: %v", err)
+			}
+			time.Sleep(watchRetryDelay)
+			continue
+		}
+		w.emitSnapshot()
+	}
 }
 
 func (w *Watcher) watchNodes(ctx context.Context, rv string) {

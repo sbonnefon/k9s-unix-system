@@ -1,4 +1,4 @@
-import { state, selection, statusColor, formatBytes, workloadKey, podWorkload } from './state.js';
+import { state, selection, statusColor, formatBytes, workloadKey, podWorkload, eventsForResource, relativeTime } from './state.js';
 import { selectorMatchesLabels } from './connections.js';
 
 const detailPanel = document.getElementById('detail-panel');
@@ -20,6 +20,17 @@ function dpLabelsHTML(labels) {
     .map(([k, v]) => `<span class="dp-label-tag">${k}=${v}</span>`)
     .join('');
   return `<div class="dp-section"><div class="dp-section-title">Labels</div><div class="dp-labels-list">${tags}</div></div>`;
+}
+
+function eventsHTML(kind, name, namespace) {
+  const events = eventsForResource(kind, name, namespace).slice(0, 20);
+  if (events.length === 0) return '';
+  const items = events.map(e => {
+    const cls = e.type === 'Warning' ? 'dp-status-error' : 'dp-status-ok';
+    const ago = relativeTime(e.lastTimestamp);
+    return `<div class="dp-svc-item"><div class="dp-svc-name"><span class="${cls}">${e.type}</span> ${e.reason}</div><div class="dp-svc-detail">${e.message}${ago ? ` (${ago}` + (e.count > 1 ? `, x${e.count}` : '') + ')' : ''}</div></div>`;
+  }).join('');
+  return `<div class="dp-section"><div class="dp-section-title">Events</div>${items}</div>`;
 }
 
 function servicesForPod(pod) {
@@ -95,6 +106,7 @@ export function showPodDetail(pod) {
     ${workloadHTML}
     ${svcHTML}
     ${dpLabelsHTML(pod.labels)}
+    ${eventsHTML('Pod', pod.name, pod.namespace)}
   `;
   openDetailPanel();
 }
@@ -136,6 +148,7 @@ export function showNodeDetail(node) {
       ${dpRow('Memory', node.memoryCapacity ? formatBytes(node.memoryCapacity) : '—')}
     </div>
     ${podsHTML}
+    ${eventsHTML('Node', node.name, '')}
   `;
   openDetailPanel();
 }
@@ -177,6 +190,7 @@ export function showWorkloadDetail(wl) {
       ${wl.availableReplicas !== undefined ? dpRow('Available', wl.availableReplicas) : ''}
     </div>
     ${podsHTML}
+    ${eventsHTML(wl.kind, wl.name, wl.namespace)}
   `;
   openDetailPanel();
 }

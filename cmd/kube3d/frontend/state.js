@@ -10,6 +10,7 @@ export const state = {
   serviceLines: null,
   ingresses: [],
   ingressLines: null,
+  k8sEvents: [],
 };
 
 export const selection = {
@@ -38,6 +39,10 @@ export function podMatchesFilter(pod, filter) {
       return CRASHLOOP_STATUSES.has(pod.status) || pod.restarts > 0;
     case 'unscheduled':
       return pod.status === 'Pending' || !pod.ready;
+    case 'warnings':
+      return state.k8sEvents.some(e =>
+        e.type === 'Warning' && e.involvedObjectName === pod.name && e.namespace === pod.namespace
+      );
     default:
       return true;
   }
@@ -49,7 +54,7 @@ export function nodeMatchesFilter(node, filter) {
 }
 
 export function countProblems() {
-  const counts = { unhealthy: 0, crashloop: 0, unscheduled: 0 };
+  const counts = { unhealthy: 0, crashloop: 0, unscheduled: 0, warnings: 0 };
   for (const [, ns] of state.namespaces) {
     for (const [, mesh] of ns.pods) {
       const pod = mesh.userData.pod;
@@ -59,6 +64,7 @@ export function countProblems() {
       if (pod.status === 'Pending' || !pod.ready) counts.unscheduled++;
     }
   }
+  counts.warnings = state.k8sEvents.filter(e => e.type === 'Warning').length;
   return counts;
 }
 
@@ -132,6 +138,22 @@ export function podWorkload(pod) {
     return { kind: pod.ownerKind, name: pod.ownerName };
   }
   return { kind: 'Pod', name: pod.name };
+}
+
+export function relativeTime(unixSeconds) {
+  if (!unixSeconds) return '';
+  const delta = Math.floor(Date.now() / 1000 - unixSeconds);
+  if (delta < 0) return 'just now';
+  if (delta < 60) return delta + 's ago';
+  if (delta < 3600) return Math.floor(delta / 60) + 'm ago';
+  if (delta < 86400) return Math.floor(delta / 3600) + 'h ago';
+  return Math.floor(delta / 86400) + 'd ago';
+}
+
+export function eventsForResource(kind, name, namespace) {
+  return state.k8sEvents
+    .filter(e => e.involvedObjectKind === kind && e.involvedObjectName === name && e.namespace === namespace)
+    .sort((a, b) => b.lastTimestamp - a.lastTimestamp);
 }
 
 // Shared depth-transparency cache position (reset by problem filter toggle)

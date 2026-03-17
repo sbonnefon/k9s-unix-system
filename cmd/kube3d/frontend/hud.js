@@ -11,6 +11,7 @@ export function updateHUD() {
   document.getElementById('node-count').textContent = state.nodes.size;
   document.getElementById('svc-count').textContent = state.services.length;
   document.getElementById('ingress-count').textContent = state.ingresses.length;
+  document.getElementById('warning-count').textContent = state.k8sEvents.filter(e => e.type === 'Warning').length;
   updateProblemFilterUI();
 }
 

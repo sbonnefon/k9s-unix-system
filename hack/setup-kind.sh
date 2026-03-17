@@ -272,6 +272,67 @@ spec:
         memory: 8Mi
   restartPolicy: Always
 ---
+# Pod with bad image → ImagePullBackOff warnings
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-image
+  namespace: backend
+  labels:
+    app: bad-image
+spec:
+  containers:
+  - name: broken
+    image: nginx:does-not-exist-99
+    resources:
+      requests:
+        cpu: 10m
+        memory: 8Mi
+---
+# Pod referencing missing configmap → CreateContainerConfigError warnings
+apiVersion: v1
+kind: Pod
+metadata:
+  name: missing-config
+  namespace: monitoring
+  labels:
+    app: missing-config
+spec:
+  containers:
+  - name: app
+    image: nginx:alpine
+    envFrom:
+    - configMapRef:
+        name: does-not-exist
+    resources:
+      requests:
+        cpu: 10m
+        memory: 8Mi
+---
+# Deployment requesting impossible resources → FailedScheduling warnings
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memory-hog
+  namespace: logging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: memory-hog
+  template:
+    metadata:
+      labels:
+        app: memory-hog
+    spec:
+      containers:
+      - name: hog
+        image: nginx:alpine
+        resources:
+          requests:
+            cpu: 10m
+            memory: 128Gi
+---
 # ── Services ────────────────────────────────────────────────────
 apiVersion: v1
 kind: Service
@@ -448,7 +509,11 @@ EOF
 
 echo ""
 echo "⏳ Waiting for pods to be ready..."
-kubectl wait --for=condition=available deployment --all --all-namespaces --timeout=120s 2>/dev/null || true
+kubectl get deployments --all-namespaces --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name \
+  | grep -v memory-hog \
+  | while read -r ns name; do
+      kubectl wait --for=condition=available deployment/"$name" -n "$ns" --timeout=120s 2>/dev/null || true
+    done
 
 # ── Restricted user: monitoring-viewer ─────────────────────────
 VIEWER_NS="monitoring"

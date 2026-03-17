@@ -4,6 +4,12 @@ All notable changes to `k8s-unix-system` are documented in this file.
 
 ## Unreleased
 
+- Add Kubernetes Events as first-class diagnostics (Warning events, live watch, 30-min TTL).
+- Show events in the detail panel for pods, nodes, and workloads.
+- Add WARNINGS problem filter and warning count to HUD.
+- Add events to omnisearch (`kind:event`) with navigation to involved resource.
+- Add event-generating sample workloads to the kind setup script (bad image, missing configmap, impossible resource requests).
+
 ## [1.3.0] - 2026-03-16
 
 - Add `--namespace` / `-n` flag to scope all watches to a single namespace, enabling use with restricted RBAC permissions.
