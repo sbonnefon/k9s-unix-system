@@ -401,7 +401,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 	var pvsResourceVersion string
 	pvList, err := w.clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		log.Printf("Skipping persistent volumes (no cluster-scope permission)")
+		log.Printf("Skipping persistent volumes: %v", err)
 	} else {
 		pvsResourceVersion = pvList.ResourceVersion
 		for i := range pvList.Items {

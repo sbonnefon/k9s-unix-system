@@ -177,12 +177,16 @@ function handleEvent(event) {
         if (idx >= 0) state.pvs[idx] = event.pv;
         else state.pvs.push(event.pv);
       }
+      rebuildPVCLines();
+      updateHUD();
       break;
 
     case 'pv_deleted':
       if (event.pv) {
         state.pvs = state.pvs.filter(p => p.name !== event.pv.name);
       }
+      rebuildPVCLines();
+      updateHUD();
       break;
 
     case 'workloads_snapshot':
