@@ -466,7 +466,7 @@ function nodeBlockMaterial(status) {
   });
 }
 
-// ── Text Labels (canvas texture → flat on ground or billboard) ──
+// ── Text Labels (canvas texture → flat on ground) ─────────────
 function makeLabel(text, fontSize = 64, color = '#00ff88', { billboard = false } = {}) {
   const padding = 14;
   const cvs = document.createElement('canvas');
@@ -538,59 +538,6 @@ function makeBeveledPlatformGeo(width, height, depth) {
   return geo;
 }
 
-// ── Pod geometry by owner kind ─────────────────────────────────
-// Shared pod geometries — created once, reused for all pods of same type
-const _sharedGeo = {
-  box: new THREE.BoxGeometry(POD_BASE_SIZE, POD_BASE_SIZE, POD_BASE_SIZE),
-  cylinder: new THREE.CylinderGeometry(POD_BASE_SIZE * 0.5, POD_BASE_SIZE * 0.5, POD_BASE_SIZE, 6),
-  octahedron: new THREE.OctahedronGeometry(POD_BASE_SIZE * 0.5),
-  cone: new THREE.ConeGeometry(POD_BASE_SIZE * 0.45, POD_BASE_SIZE, 5),
-};
-
-function podGeometry(ownerKind) {
-  switch (ownerKind) {
-    case 'StatefulSet':  return _sharedGeo.cylinder;
-    case 'DaemonSet':    return _sharedGeo.octahedron;
-    case 'Job':
-    case 'CronJob':      return _sharedGeo.cone;
-    default:             return _sharedGeo.box;
-  }
-}
-
-// Container count rings around a pod mesh
-function addContainerRings(parentGroup, mesh, containerCount, podColor) {
-  // Remove old rings
-  const oldRings = parentGroup.children.filter(c => c.userData._ringFor === mesh.uuid);
-  for (const r of oldRings) {
-    parentGroup.remove(r);
-    r.geometry.dispose();
-    r.material.dispose();
-  }
-  if (containerCount <= 1) return;
-
-  const bbox = new THREE.Box3().setFromObject(mesh);
-  const size = new THREE.Vector3();
-  bbox.getSize(size);
-  const baseRadius = Math.max(size.x, size.z) * 0.55;
-
-  for (let i = 1; i < containerCount; i++) {
-    const ringRadius = baseRadius + i * 0.15;
-    const ringGeo = new THREE.TorusGeometry(ringRadius, 0.03, 6, 24);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: podColor,
-      transparent: true,
-      opacity: 0.6,
-      depthWrite: false,
-    });
-    const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.rotation.x = Math.PI / 2;
-    ring.position.copy(mesh.position);
-    ring.position.y = 0.05 + i * 0.12;
-    ring.userData = { _ringFor: mesh.uuid };
-    parentGroup.add(ring);
-  }
-}
-
 // ── Namespace Layout ───────────────────────────────────────────
 function layoutNamespaces() {
   // Build the node island first so we can include it in the grid
@@ -616,10 +563,105 @@ function layoutNamespaces() {
   for (const nsName of nsList) {
     const ns = state.namespaces.get(nsName);
     const podCount = ns.pods.size;
-    const podCols = Math.max(2, Math.ceil(Math.sqrt(podCount)));
-    const podRows = Math.max(1, Math.ceil(podCount / podCols));
-    const platWidth = podCols * POD_STRIDE + 2;
-    const platDepth = podRows * POD_STRIDE + 2;
+
+    // Build CronJob → Job name map for this namespace (CronJob owns Job owns Pod)
+    const nsCronJobToJobs = new Map();
+    for (const wl of state.workloads) {
+      if (wl.kind === 'Job' && wl.namespace === nsName) {
+        for (const cj of state.workloads) {
+          if (cj.kind === 'CronJob' && cj.namespace === nsName && wl.name.startsWith(cj.name + '-')) {
+            if (!nsCronJobToJobs.has(cj.name)) nsCronJobToJobs.set(cj.name, []);
+            nsCronJobToJobs.get(cj.name).push(wl.name);
+          }
+        }
+      }
+    }
+
+    // Determine which workloads have matching pods (used for orphan detection + sizing)
+    const wlHasPods = new Set();
+    for (const wl of state.workloads) {
+      if (wl.namespace !== nsName) continue;
+      for (const [, podMesh] of ns.pods) {
+        const pod = podMesh.userData.pod;
+        if (!pod) continue;
+        if (pod.ownerKind === wl.kind && pod.ownerName === wl.name) {
+          wlHasPods.add(wl.kind + '/' + wl.name);
+          break;
+        }
+        if (wl.kind === 'CronJob') {
+          const jobNames = nsCronJobToJobs.get(wl.name) || [];
+          if (pod.ownerKind === 'Job' && jobNames.includes(pod.ownerName)) {
+            wlHasPods.add(wl.kind + '/' + wl.name);
+            break;
+          }
+        }
+      }
+    }
+
+    const orphanWls = state.workloads.filter(wl =>
+      wl.namespace === nsName && !wlHasPods.has(wl.kind + '/' + wl.name)
+    );
+
+    // Slightly more cols than rows → horizontal rectangle (~1.3:1 ratio)
+    const podCols = podCount > 0
+      ? Math.max(2, Math.ceil(Math.sqrt(podCount * 1.3)))
+      : Math.max(2, Math.ceil(Math.sqrt(orphanWls.length * 1.3)));
+
+    // Estimate rows: simulate the flow layout (fill row, then next)
+    let estRows = 0;
+    if (podCount > 0) {
+      let c = 0;
+      const wlGroupsForSize = new Map();
+      let ungroupedCount = 0;
+      for (const [, podMesh] of ns.pods) {
+        const pod = podMesh.userData.pod;
+        if (pod && pod.ownerKind && pod.ownerName) {
+          const key = pod.ownerKind + '/' + pod.ownerName;
+          wlGroupsForSize.set(key, (wlGroupsForSize.get(key) || 0) + 1);
+        } else {
+          ungroupedCount++;
+        }
+      }
+      for (const [, count] of wlGroupsForSize) {
+        if (c > 0 && c + count > podCols && count <= podCols) {
+          estRows++;
+          c = 0;
+        }
+        for (let i = 0; i < count; i++) {
+          if (c >= podCols) { c = 0; estRows++; }
+          c++;
+        }
+      }
+      for (let i = 0; i < ungroupedCount; i++) {
+        if (c >= podCols) { c = 0; estRows++; }
+        c++;
+      }
+      if (c > 0) estRows++;
+      estRows = Math.max(1, estRows);
+    }
+
+    // Pod zone: only as large as needed (0 if no pods)
+    const podZoneDepth = podCount > 0 ? estRows * POD_STRIDE + 2 : 0;
+    let platWidth = podCols * POD_STRIDE + 2;
+
+    // Orphan zone
+    let orphanZoneDepth = 0;
+    if (orphanWls.length > 0) {
+      const orphanSpacing = 2.5;
+      const orphanCols = Math.max(2, Math.min(orphanWls.length, Math.floor(platWidth / orphanSpacing)));
+      const orphanRows = Math.ceil(orphanWls.length / orphanCols);
+      const orphanWidth = orphanCols * orphanSpacing + 1;
+      orphanZoneDepth = orphanRows * orphanSpacing + 1;
+      platWidth = Math.max(platWidth, orphanWidth + 2);
+    }
+
+    // Total platform = pod zone + orphan zone (minimum size for label visibility)
+    let platDepth = Math.max(podZoneDepth + orphanZoneDepth, 3);
+
+    ns.platWidth = platWidth;
+    ns.platDepth = platDepth;
+    ns.orphanZoneDepth = orphanZoneDepth;
+    ns.podZoneDepth = podZoneDepth;
     entries.push({ group: ns.group, platWidth, platDepth, nsName });
   }
 
@@ -670,12 +712,26 @@ function layoutNamespaces() {
       ns.platform.material.dispose();
       ns.group.remove(ns.platform);
     }
+    if (ns.wireframe) {
+      ns.wireframe.material.dispose();
+      ns.group.remove(ns.wireframe);
+      ns.wireframe = null;
+    }
     const platGeo = makeBeveledPlatformGeo(entry.platWidth, PLATFORM_HEIGHT, entry.platDepth);
     const mat = ns.forbidden ? forbiddenPlatformMaterial.clone() : platformMaterial.clone();
     ns.platform = new THREE.Mesh(platGeo, mat);
     ns.platform.position.y = -PLATFORM_HEIGHT / 2;
     ns.platform.userData = { type: 'namespace', name: entry.nsName };
     ns.group.add(ns.platform);
+
+    // Add wireframe edges for forbidden namespaces
+    if (ns.forbidden) {
+      const edgesGeo = new THREE.EdgesGeometry(platGeo);
+      const edgesMat = new THREE.LineBasicMaterial({ color: 0xff4444, transparent: true, opacity: 0.5 });
+      ns.wireframe = new THREE.LineSegments(edgesGeo, edgesMat);
+      ns.wireframe.position.y = -PLATFORM_HEIGHT / 2;
+      ns.group.add(ns.wireframe);
+    }
 
     // Reposition label
     if (ns.label) ns.group.remove(ns.label);
@@ -685,20 +741,78 @@ function layoutNamespaces() {
     ns.label.position.set(0, 0.15, entry.platDepth / 2 + 2);
     ns.group.add(ns.label);
 
-    // Lay out pods
-    const podCols = Math.max(2, Math.ceil(Math.sqrt(ns.pods.size)));
-    const podRows = Math.max(1, Math.ceil(ns.pods.size / podCols));
-    let idx = 0;
+    // Lay out pods grouped by workload owner, filling rows left-to-right
+    // 1. Build workload groups: ownerKey -> [podMesh, ...]
+    const wlGroups = new Map(); // "Kind/Name" -> [podMesh]
+    const ungrouped = [];       // pods with no owner
     for (const [, podMesh] of ns.pods) {
-      const pc = idx % podCols;
-      const pr = Math.floor(idx / podCols);
-      const h = podMesh.geometry.parameters.height || POD_BASE_SIZE;
-      podMesh.position.set(
-        pc * POD_STRIDE - (podCols * POD_STRIDE) / 2 + POD_STRIDE / 2,
+      const pod = podMesh.userData.pod;
+      if (pod && pod.ownerKind && pod.ownerName) {
+        const key = pod.ownerKind + '/' + pod.ownerName;
+        if (!wlGroups.has(key)) wlGroups.set(key, []);
+        wlGroups.get(key).push(podMesh);
+      } else {
+        ungrouped.push(podMesh);
+      }
+    }
+
+    // 2. Sort groups: active workloads first, then by kind priority
+    //    Active = has running/ready pods; Inactive = succeeded/failed/pending only
+    const kindOrder = { Deployment: 0, StatefulSet: 1, DaemonSet: 2, ReplicaSet: 3, Job: 4, CronJob: 5 };
+    const isGroupActive = (pods) => pods.some(m => {
+      const p = m.userData.pod;
+      return p && (p.status === 'Running' || p.ready);
+    });
+    const sortedGroups = [...wlGroups.entries()].sort((a, b) => {
+      const activeA = isGroupActive(a[1]) ? 0 : 1;
+      const activeB = isGroupActive(b[1]) ? 0 : 1;
+      if (activeA !== activeB) return activeA - activeB;
+      const kindA = a[0].split('/')[0];
+      const kindB = b[0].split('/')[0];
+      return (kindOrder[kindA] ?? 9) - (kindOrder[kindB] ?? 9);
+    });
+
+    // 3. Flow layout: fill rows left-to-right, keep groups contiguous
+    const gridCols = Math.max(2, Math.ceil(Math.sqrt(ns.pods.size * 1.3)));
+    let curCol = 0, curRow = 0;
+    const allPlaced = [];
+
+    const placeGroup = (pods) => {
+      // If this group won't fit the remainder of the current row
+      // and it could fit on a fresh row, wrap to next row first
+      if (curCol > 0 && curCol + pods.length > gridCols && pods.length <= gridCols) {
+        curCol = 0;
+        curRow++;
+      }
+      for (const podMesh of pods) {
+        if (curCol >= gridCols) {
+          curCol = 0;
+          curRow++;
+        }
+        allPlaced.push({ mesh: podMesh, col: curCol, row: curRow });
+        curCol++;
+      }
+    };
+
+    for (const [, pods] of sortedGroups) {
+      placeGroup(pods);
+    }
+    if (ungrouped.length > 0) {
+      placeGroup(ungrouped);
+    }
+
+    // 4. Position pods with correct centering — offset into pod zone (top of platform)
+    //    The platform = pod zone (top) + orphan zone (bottom, positive Z)
+    //    Pods should be centered in the pod zone, shifted up by orphanZoneDepth/2
+    const totalRows = (curCol > 0 ? curRow + 1 : curRow) || 1;
+    const podZoneOffsetZ = -(ns.orphanZoneDepth || 0) / 2;
+    for (const { mesh, col, row } of allPlaced) {
+      const h = mesh.geometry.parameters.height || POD_BASE_SIZE;
+      mesh.position.set(
+        col * POD_STRIDE - (gridCols * POD_STRIDE) / 2 + POD_STRIDE / 2,
         POD_Y_OFFSET + h / 2,
-        pr * POD_STRIDE - (podRows * POD_STRIDE) / 2 + POD_STRIDE / 2
+        row * POD_STRIDE - (totalRows * POD_STRIDE) / 2 + POD_STRIDE / 2 + podZoneOffsetZ
       );
-      idx++;
     }
   });
 
@@ -739,6 +853,59 @@ function ensureNamespace(name, forbidden = false) {
   const ns = { group, platform: null, pods: new Map(), label: null, forbidden, wireframe: null, platWidth: 0, platDepth: 0 };
   state.namespaces.set(name, ns);
   return ns;
+}
+
+// Shared pod geometries — created once, reused for all pods of same type
+const _sharedGeo = {
+  box: new THREE.BoxGeometry(POD_BASE_SIZE, POD_BASE_SIZE, POD_BASE_SIZE),
+  cylinder: new THREE.CylinderGeometry(POD_BASE_SIZE * 0.5, POD_BASE_SIZE * 0.5, POD_BASE_SIZE, 6),
+  octahedron: new THREE.OctahedronGeometry(POD_BASE_SIZE * 0.5),
+  cone: new THREE.ConeGeometry(POD_BASE_SIZE * 0.45, POD_BASE_SIZE, 5),
+};
+
+// Pod geometry based on owner kind — returns shared geometry
+function podGeometry(ownerKind) {
+  switch (ownerKind) {
+    case 'StatefulSet':  return _sharedGeo.cylinder;
+    case 'DaemonSet':    return _sharedGeo.octahedron;
+    case 'Job':
+    case 'CronJob':      return _sharedGeo.cone;
+    default:             return _sharedGeo.box;
+  }
+}
+
+// Container count rings around a pod mesh
+function addContainerRings(parentGroup, mesh, containerCount, podColor) {
+  // Remove old rings
+  const oldRings = parentGroup.children.filter(c => c.userData._ringFor === mesh.uuid);
+  for (const r of oldRings) {
+    parentGroup.remove(r);
+    r.geometry.dispose();
+    r.material.dispose();
+  }
+  if (containerCount <= 1) return;
+
+  const bbox = new THREE.Box3().setFromObject(mesh);
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+  const baseRadius = Math.max(size.x, size.z) * 0.55;
+
+  for (let i = 1; i < containerCount; i++) {
+    const ringRadius = baseRadius + i * 0.15;
+    const ringGeo = new THREE.TorusGeometry(ringRadius, 0.03, 6, 24);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: podColor,
+      transparent: true,
+      opacity: 0.6,
+      depthWrite: false,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = Math.PI / 2;
+    ring.position.copy(mesh.position);
+    ring.position.y = 0.05 + i * 0.12;
+    ring.userData = { _ringFor: mesh.uuid };
+    parentGroup.add(ring);
+  }
 }
 
 function addOrUpdatePod(nsName, pod) {
@@ -904,9 +1071,11 @@ function podURLs(pod) {
     s => s.namespace === pod.namespace && selectorMatchesLabels(s.selector, pod.labels)
   );
   // Find ingresses that target those services
+  // Check both same-namespace ingresses AND cross-namespace (serviceNamespace field)
   for (const ing of state.ingresses) {
     for (const rule of ing.rules || []) {
       if (!rule.serviceName) continue;
+      // Determine which namespace this rule targets
       const targetNs = rule.serviceNamespace || ing.namespace;
       if (targetNs !== pod.namespace) continue;
       if (matchedSvcs.some(s => s.name === rule.serviceName)) {
@@ -934,12 +1103,9 @@ function rebuildServiceLines() {
   const group = new THREE.Group();
   group.userData = { type: 'serviceLines' };
 
-  const lineMat = new THREE.LineBasicMaterial({
-    color: 0x00aaff,
-    transparent: true,
-    opacity: 0.25,
-    depthWrite: false,
-  });
+  const TUBE_RADIUS = 0.06;
+  const TUBE_SEGMENTS = 20;
+  const TUBE_RADIAL = 6;
 
   for (const svc of state.services) {
     if (!svc.selector || Object.keys(svc.selector).length === 0) continue;
@@ -956,26 +1122,58 @@ function rebuildServiceLines() {
       }
     }
 
-    if (matchedMeshes.length < 2) continue;
+    if (matchedMeshes.length < 1) continue;
 
-    // Draw lines between all matched pods (star topology from first pod)
     const worldPos = (mesh) => {
       const v = new THREE.Vector3();
       mesh.getWorldPosition(v);
       return v;
     };
 
-    const anchor = worldPos(matchedMeshes[0]);
-    for (let j = 1; j < matchedMeshes.length; j++) {
-      const target = worldPos(matchedMeshes[j]);
-      // Curved arc: midpoint lifted above
-      const mid = anchor.clone().add(target).multiplyScalar(0.5);
-      mid.y += 2;
-      const curve = new THREE.QuadraticBezierCurve3(anchor, mid, target);
-      const points = curve.getPoints(16);
-      const geo = new THREE.BufferGeometry().setFromPoints(points);
-      const line = new THREE.Line(geo, lineMat.clone());
-      group.add(line);
+    // Compute service anchor point: center above all matched pods
+    const center = new THREE.Vector3();
+    for (const m of matchedMeshes) center.add(worldPos(m));
+    center.divideScalar(matchedMeshes.length);
+    center.y += 2.5;
+
+    // Service hub — a small glowing sphere at the anchor point
+    const hubGeo = new THREE.SphereGeometry(0.18, 12, 12);
+    const hubMat = new THREE.MeshPhongMaterial({
+      color: 0x00aaff, emissive: 0x00aaff, emissiveIntensity: 0.8,
+      transparent: true, opacity: 0.9,
+    });
+    const hub = new THREE.Mesh(hubGeo, hubMat);
+    hub.position.copy(center);
+    hub.userData = {
+      type: 'service',
+      service: svc,
+      matchedPodCount: matchedMeshes.length,
+    };
+    group.add(hub);
+
+    // Draw tubes from hub to each matched pod
+    const tubeMat = new THREE.MeshPhongMaterial({
+      color: 0x00aaff,
+      emissive: 0x004466,
+      emissiveIntensity: 0.5,
+      transparent: true,
+      opacity: 0.35,
+      depthWrite: false,
+    });
+
+    for (const podMesh of matchedMeshes) {
+      const target = worldPos(podMesh);
+      const mid = center.clone().add(target).multiplyScalar(0.5);
+      mid.y += 1.0;
+      const curve = new THREE.QuadraticBezierCurve3(center, mid, target);
+      const tubeGeo = new THREE.TubeGeometry(curve, TUBE_SEGMENTS, TUBE_RADIUS, TUBE_RADIAL, false);
+      const tube = new THREE.Mesh(tubeGeo, tubeMat.clone());
+      tube.userData = {
+        type: 'service',
+        service: svc,
+        matchedPodCount: matchedMeshes.length,
+      };
+      group.add(tube);
     }
   }
 
@@ -1049,7 +1247,7 @@ function rebuildIngresses() {
     label.position.set(archX, 3.0, archZ);
     group.add(label);
 
-    // Lines from arch to target services' pods
+    // Lines from arch to target services' pods (all ingresses combined)
     for (const ing of nsIngresses) {
       for (const rule of ing.rules || []) {
         if (!rule.serviceName) continue;
@@ -1057,6 +1255,7 @@ function rebuildIngresses() {
         const svc = state.services.find(s => s.name === rule.serviceName && s.namespace === targetNs);
         if (!svc || !svc.selector) continue;
 
+        // Find pods in the target namespace (may differ from ingress namespace)
         const targetNsState = state.namespaces.get(targetNs);
         if (!targetNsState) continue;
         for (const [, podMesh] of targetNsState.pods) {
@@ -1152,13 +1351,17 @@ function rebuildWorkloadGroups() {
   const group = new THREE.Group();
   group.userData = { type: 'workloadGroup' };
 
+  // Workload kind abbreviations and colors
   const WL_ABBREV = { Deployment: 'deploy', StatefulSet: 'sts', DaemonSet: 'ds', CronJob: 'cj', Job: 'job' };
   const WL_COLORS = { Deployment: 0x00ff88, StatefulSet: 0x00aaff, DaemonSet: 0x44ccaa, CronJob: 0xffaa00, Job: 0xffcc66 };
 
   // For CronJobs, pods are owned by Jobs (not CronJobs directly).
+  // Build a map of CronJob name -> Job names so we can find their pods.
   const cronJobToJobs = new Map();
   for (const wl of state.workloads) {
     if (wl.kind === 'Job') {
+      // Job names from CronJobs follow the pattern: <cronjob-name>-<timestamp>
+      // Try to match with existing CronJobs in the same namespace
       for (const cjWl of state.workloads) {
         if (cjWl.kind === 'CronJob' && cjWl.namespace === wl.namespace && wl.name.startsWith(cjWl.name + '-')) {
           if (!cronJobToJobs.has(cjWl.namespace + '/' + cjWl.name)) {
@@ -1170,14 +1373,17 @@ function rebuildWorkloadGroups() {
     }
   }
 
+  // Track which pods are already claimed to avoid double-matching
   const claimedPods = new Set();
 
+  // Process workloads: most specific owners first (Job before CronJob),
+  // then active before inactive (for orphan ordering)
   const wlSorted = [...state.workloads].sort((a, b) => {
     const order = { Job: 0, Deployment: 1, StatefulSet: 2, DaemonSet: 3, CronJob: 4 };
     return (order[a.kind] ?? 5) - (order[b.kind] ?? 5);
   });
 
-  // Pre-count orphans per namespace
+  // Pre-count orphans per namespace for centering
   const orphanTotals = {};
   for (const wl of wlSorted) {
     const ns = state.namespaces.get(wl.namespace);
@@ -1200,6 +1406,7 @@ function rebuildWorkloadGroups() {
     const ns = state.namespaces.get(wl.namespace);
     if (!ns) continue;
 
+    // Find matching pods (only unclaimed ones)
     const matchedMeshes = [];
     for (const [podName, podMesh] of ns.pods) {
       if (claimedPods.has(wl.namespace + '/' + podName)) continue;
@@ -1207,10 +1414,15 @@ function rebuildWorkloadGroups() {
       if (!pod) continue;
 
       let matched = false;
-      if (pod.ownerKind === wl.kind && pod.ownerName === wl.name) matched = true;
+      if (pod.ownerKind === wl.kind && pod.ownerName === wl.name) {
+        matched = true;
+      }
+      // CronJob: match pods owned by child Jobs
       if (!matched && wl.kind === 'CronJob') {
         const jobNames = cronJobToJobs.get(wl.namespace + '/' + wl.name) || [];
-        if (pod.ownerKind === 'Job' && jobNames.includes(pod.ownerName)) matched = true;
+        if (pod.ownerKind === 'Job' && jobNames.includes(pod.ownerName)) {
+          matched = true;
+        }
       }
       if (matched) {
         matchedMeshes.push(podMesh);
@@ -1222,6 +1434,7 @@ function rebuildWorkloadGroups() {
     let cx, cz, w, d;
 
     if (matchedMeshes.length === 0) {
+      // Place orphan workloads in the orphan zone (bottom of namespace platform)
       if (!orphanCounters[wl.namespace]) orphanCounters[wl.namespace] = 0;
       const orphanIdx = orphanCounters[wl.namespace]++;
       const nsGroup = ns.group;
@@ -1233,6 +1446,8 @@ function rebuildWorkloadGroups() {
       const col = orphanIdx % orphanCols;
       const row = Math.floor(orphanIdx / orphanCols);
       const totalOrphanCols = Math.min(orphanCols, totalOrphans);
+      // Orphan zone starts at (platDepth/2 - orphanZoneDepth) in local coords
+      // Center orphans within that zone
       const orphanRows = Math.ceil(totalOrphans / orphanCols);
       const orphanBlockDepth = orphanRows * orphanSpacing;
       const orphanZoneCenter = halfD - ozDepth / 2;
@@ -1241,6 +1456,7 @@ function rebuildWorkloadGroups() {
       w = 2.0;
       d = 2.0;
     } else {
+      // Compute bounding box of matched pods
       let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
       for (const mesh of matchedMeshes) {
         const wp = new THREE.Vector3();
@@ -1295,6 +1511,7 @@ function rebuildWorkloadGroups() {
       labelText = `${abbrev}/${wl.name} ${wl.readyReplicas}/${wl.replicas}`;
     } else {
       const healthy = wl.readyReplicas >= wl.replicas;
+      // Use workload-type color when healthy, warning color otherwise
       const WL_LABEL_COLORS = { Deployment: '#00ff88', StatefulSet: '#00aaff', DaemonSet: '#44ccaa', ReplicaSet: '#448899' };
       labelColor = healthy ? (WL_LABEL_COLORS[wl.kind] || '#00ff88') : '#ffcc00';
       labelText = `${abbrev}/${wl.name} ${wl.readyReplicas}/${wl.replicas}`;
@@ -1330,6 +1547,7 @@ const RESOURCE_COLORS = {
   ClusterRoleBinding: 0x998844,
 };
 
+// Map resource kind to layer key
 function resourceLayerKey(kind) {
   switch (kind) {
     case 'ConfigMap': return 'configmaps';
@@ -1345,9 +1563,9 @@ function resourceLayerKey(kind) {
 }
 
 const RESOURCE_MARKER_SIZE = 0.2;
-const RESOURCE_Y = -0.1;
+const RESOURCE_Y = -0.1; // slightly below platform surface, flush with ground
 const RESOURCE_SPACING = RESOURCE_MARKER_SIZE * 2.5;
-const RESOURCE_EDGE_GAP = 1.2;
+const RESOURCE_EDGE_GAP = 1.2; // gap between platform edge and first marker
 
 function rebuildResources() {
   if (state.resourceGroup) {
@@ -1361,7 +1579,8 @@ function rebuildResources() {
   const group = new THREE.Group();
   group.userData = { type: 'resourceGroup' };
 
-  const byNs = new Map();
+  // Group resources by namespace, then by layer
+  const byNs = new Map(); // nsName -> resources[]
   for (const res of state.resources) {
     const nsKey = res.namespace || '__cluster__';
     if (!byNs.has(nsKey)) byNs.set(nsKey, []);
@@ -1377,6 +1596,7 @@ function rebuildResources() {
     const halfW = ns ? (ns.platWidth || 6) / 2 : 4;
     const halfD = ns ? (ns.platDepth || 6) / 2 : 4;
 
+    // Group by layer key for visibility
     const byLayer = new Map();
     for (const res of nsResources) {
       const lk = resourceLayerKey(res.kind);
@@ -1384,8 +1604,12 @@ function rebuildResources() {
       byLayer.get(lk).push(res);
     }
 
+    // Distribute layer groups around three edges: left, right, bottom
+    // Each layer gets a "strip" along one edge
     const layerEntries = [...byLayer.entries()];
-    const edgeSlots = [];
+    const edgeSlots = []; // { side, offset } for each layer strip
+
+    // Assign edges: cycle through left, bottom, right
     const sides = ['left', 'bottom', 'right'];
     const sideCounters = { left: 0, bottom: 0, right: 0 };
 
@@ -1403,16 +1627,21 @@ function rebuildResources() {
       subGroup.userData = { layerKey };
       subGroup.visible = !!layers[layerKey];
 
-      const platH = halfD * 2;
-      const platW = halfW * 2;
+      // Compute how many items fit along the edge, then wrap into rows/cols
+      const platH = halfD * 2; // island height (Z extent)
+      const platW = halfW * 2; // island width (X extent)
 
-      let maxAlong;
+      let maxAlong, maxPerp; // max items along edge, perpendicular rows/cols
       if (side === 'left' || side === 'right') {
+        // Along Z axis, wrap into columns going outward (X)
         maxAlong = Math.max(1, Math.floor(platH / RESOURCE_SPACING));
       } else {
+        // Along X axis, wrap into rows going outward (Z)
         maxAlong = Math.max(1, Math.floor(platW / RESOURCE_SPACING));
       }
       const wrapCols = Math.ceil(resources.length / maxAlong);
+
+      // Base offset for this strip (multiple strips per side stack outward)
       const stripBase = stripIdx * (wrapCols * RESOURCE_SPACING + RESOURCE_SPACING);
 
       for (let i = 0; i < resources.length; i++) {
@@ -1428,8 +1657,8 @@ function rebuildResources() {
         });
         const mesh = new THREE.Mesh(geo, mat);
 
-        const along = i % maxAlong;
-        const perp = Math.floor(i / maxAlong);
+        const along = i % maxAlong;   // position along the edge
+        const perp = Math.floor(i / maxAlong); // which row/col outward
 
         let mx, mz;
         if (side === 'left') {
@@ -1448,6 +1677,7 @@ function rebuildResources() {
         subGroup.add(mesh);
       }
 
+      // Summary label at the start of each strip
       if (resources.length > 0) {
         const kindCounts = {};
         for (const r of resources) kindCounts[r.kind] = (kindCounts[r.kind] || 0) + 1;
@@ -1497,6 +1727,7 @@ function applyLayerVisibility() {
     }
   }
 
+  // Resource sub-groups visibility
   if (state.resourceGroup) {
     for (const child of state.resourceGroup.children) {
       if (child.userData && child.userData.layerKey) {
@@ -2064,7 +2295,7 @@ function applyHoverHighlight(mesh) {
   if (mat.emissive) {
     mat.emissiveIntensity = Math.max(mat.emissiveIntensity * 3, 2);
   }
-  // Boost opacity for transparent objects
+  // Boost opacity for transparent objects (workloads, ingress arches, etc.)
   if (mat.transparent && mat.opacity < 0.5) {
     mat.opacity = Math.min(mat.opacity * 3, 0.6);
   }
@@ -2246,6 +2477,398 @@ function updateRaycast() {
   }
 }
 
+// ── Pod animation ──────────────────────────────────────────────
+function animatePods(time) {
+  for (const [, ns] of state.namespaces) {
+    let i = 0;
+    for (const [, mesh] of ns.pods) {
+      const pod = mesh.userData.pod;
+      const h = mesh.geometry.parameters.height || POD_BASE_SIZE;
+      if (pod && pod.status === 'Running') {
+        mesh.position.y = POD_Y_OFFSET + h / 2 + Math.sin(time * 2 + i * 0.5) * 0.05;
+      } else if (pod && (pod.status === 'CrashLoopBackOff' || pod.status === 'Error')) {
+        mesh.position.y = POD_Y_OFFSET + h / 2 + Math.sin(time * 12 + i) * 0.4;
+      }
+      i++;
+    }
+  }
+}
+
+// ── Depth transparency ─────────────────────────────────────────
+const DEPTH_FADE_START = 60;
+const DEPTH_FADE_END = 250;
+const DEPTH_MIN_OPACITY = 0.25;
+
+const BASE_PLATFORM_OPACITY = 0.85;
+const BASE_POD_OPACITY = 0.9;
+const BASE_LABEL_OPACITY = 0.9;
+
+function depthOpacityFactor(distance) {
+  if (distance <= DEPTH_FADE_START) return 1;
+  if (distance >= DEPTH_FADE_END) return DEPTH_MIN_OPACITY;
+  const t = (distance - DEPTH_FADE_START) / (DEPTH_FADE_END - DEPTH_FADE_START);
+  return 1 - t * (1 - DEPTH_MIN_OPACITY);
+}
+
+const _depthTmpVec = new THREE.Vector3();
+const _lastCamPos = new THREE.Vector3();
+let _depthDirty = true;
+
+function markDepthDirty() { _depthDirty = true; }
+
+function updateDepthTransparency() {
+  const camPos = activeCamera().position;
+  // Skip if camera hasn't moved significantly (saves 300+ material updates per frame)
+  if (!_depthDirty && _lastCamPos.distanceToSquared(camPos) < 0.01) return;
+  _lastCamPos.copy(camPos);
+  _depthDirty = false;
+
+  for (const [, ns] of state.namespaces) {
+    ns.group.getWorldPosition(_depthTmpVec);
+    const dist = eagleEye.active ? 0 : camPos.distanceTo(_depthTmpVec);
+    const f = depthOpacityFactor(dist);
+
+    if (ns.platform) ns.platform.material.opacity = BASE_PLATFORM_OPACITY * f;
+    if (ns.label) ns.label.material.opacity = BASE_LABEL_OPACITY * f;
+
+    for (const [, mesh] of ns.pods) {
+      mesh.material.opacity = BASE_POD_OPACITY * f;
+    }
+  }
+
+  // Node island
+  if (state.nodeIsland) {
+    state.nodeIsland.group.getWorldPosition(_depthTmpVec);
+    const dist = eagleEye.active ? 0 : camPos.distanceTo(_depthTmpVec);
+    const f = depthOpacityFactor(dist);
+    if (state.nodeIsland.platform) state.nodeIsland.platform.material.opacity = BASE_PLATFORM_OPACITY * f;
+    if (state.nodeIsland.label) state.nodeIsland.label.material.opacity = BASE_LABEL_OPACITY * f;
+    for (const [, mesh] of state.nodeIsland.blocks) {
+      mesh.material.opacity = BASE_POD_OPACITY * f;
+    }
+  }
+}
+
+// ── Billboard labels (face camera) ────────────────────────────
+let _billboardMeshes = [];
+let _billboardCacheDirty = true;
+
+function invalidateBillboardCache() { _billboardCacheDirty = true; }
+
+function updateBillboards() {
+  const cam = activeCamera();
+  if (_billboardCacheDirty) {
+    _billboardMeshes = [];
+    scene.traverse((obj) => {
+      if (obj.isMesh && obj.userData.billboard) _billboardMeshes.push(obj);
+    });
+    _billboardCacheDirty = false;
+  }
+  for (const mesh of _billboardMeshes) {
+    mesh.quaternion.copy(cam.quaternion);
+  }
+}
+
+// ── Pod Actions (double-click menu) ────────────────────────────
+const podMenu = document.getElementById('pod-menu');
+const podMenuTitle = document.getElementById('pod-menu-title');
+const outputPanel = document.getElementById('output-panel');
+const outputTitle = document.getElementById('output-title');
+const outputBody = document.getElementById('output-body');
+const outputClose = document.getElementById('output-close');
+const killConfirm = document.getElementById('kill-confirm');
+const killPodName = document.getElementById('kill-pod-name');
+const killYes = document.getElementById('kill-yes');
+const killNo = document.getElementById('kill-no');
+
+let selectedPod = null;   // { name, namespace }
+let selectedService = null; // { name, namespace, ports }
+let logAbort = null;       // AbortController for log streaming
+
+// ── Service Actions (double-click menu) ─────────────────────────
+const svcMenu = document.getElementById('svc-menu');
+const svcMenuTitle = document.getElementById('svc-menu-title');
+
+function closeSvcMenu() {
+  svcMenu.style.display = 'none';
+  selectedService = null;
+}
+
+document.getElementById('svc-menu-describe').addEventListener('click', () => {
+  if (selectedService) { doServiceDescribe(selectedService); }
+});
+document.getElementById('svc-menu-endpoints').addEventListener('click', () => {
+  if (selectedService) { doServiceEndpoints(selectedService); }
+});
+
+async function doServiceDescribe(svc) {
+  closeOutputPanel();
+  outputTitle.textContent = `DESCRIBE  svc/${svc.namespace}/${svc.name}`;
+  outputBody.textContent = 'Loading...';
+  outputPanel.style.display = 'flex';
+
+  try {
+    const resp = await fetch(`/api/service/describe?namespace=${encodeURIComponent(svc.namespace)}&name=${encodeURIComponent(svc.name)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const desc = await resp.json();
+
+    let out = '';
+    out += `Name:       ${desc.name}\n`;
+    out += `Namespace:  ${desc.namespace}\n`;
+    out += `Type:       ${desc.type}\n`;
+    out += `ClusterIP:  ${desc.clusterIP || 'None'}\n`;
+    if (desc.externalIPs && desc.externalIPs.length) out += `External:   ${desc.externalIPs.join(', ')}\n`;
+    out += `Age:        ${desc.age}\n`;
+    if (desc.selector && Object.keys(desc.selector).length) {
+      out += `Selector:\n`;
+      for (const [k, v] of Object.entries(desc.selector)) {
+        out += `  ${k}=${v}\n`;
+      }
+    }
+    if (desc.labels && Object.keys(desc.labels).length) {
+      out += `Labels:\n`;
+      for (const [k, v] of Object.entries(desc.labels)) {
+        out += `  ${k}=${v}\n`;
+      }
+    }
+    out += `\n--- PORTS ---\n`;
+    for (const p of (desc.ports || [])) {
+      out += `  ${p.name || '(unnamed)'}  ${p.port} → ${p.targetPort}  ${p.protocol}${p.nodePort ? '  NodePort: ' + p.nodePort : ''}\n`;
+    }
+    if (desc.events && desc.events.length) {
+      out += `\n--- EVENTS ---\n`;
+      for (const ev of desc.events) {
+        out += `  ${ev}\n`;
+      }
+    }
+
+    const escaped = out.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    outputBody.innerHTML = escaped;
+  } catch (err) {
+    outputBody.textContent = `ERROR: ${err.message}`;
+  }
+}
+
+async function doServiceEndpoints(svc) {
+  closeOutputPanel();
+  outputTitle.textContent = `ENDPOINTS  svc/${svc.namespace}/${svc.name}`;
+  outputBody.textContent = 'Loading...';
+  outputPanel.style.display = 'flex';
+
+  try {
+    const resp = await fetch(`/api/service/endpoints?namespace=${encodeURIComponent(svc.namespace)}&name=${encodeURIComponent(svc.name)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+
+    let out = `Endpoints for svc/${data.namespace}/${data.name}\n`;
+    out += `${'─'.repeat(50)}\n\n`;
+
+    const subsets = data.subsets || [];
+    if (subsets.length === 0) {
+      out += '  (no endpoints)\n';
+    }
+    for (const sub of subsets) {
+      const ports = (sub.ports || []).map(p => `${p.port}/${p.protocol}${p.name ? ' (' + p.name + ')' : ''}`).join(', ');
+      out += `Ports: ${ports || '(none)'}\n\n`;
+      out += `  ${'IP'.padEnd(18)} ${'POD'.padEnd(40)} ${'NODE'.padEnd(24)} READY\n`;
+      out += `  ${'─'.repeat(18)} ${'─'.repeat(40)} ${'─'.repeat(24)} ${'─'.repeat(5)}\n`;
+      for (const addr of (sub.addresses || [])) {
+        const ready = addr.ready ? '✓' : '✗';
+        out += `  ${(addr.ip || '').padEnd(18)} ${(addr.podName || '—').padEnd(40)} ${(addr.nodeName || '—').padEnd(24)} ${ready}\n`;
+      }
+      out += '\n';
+    }
+
+    const escaped = out.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    outputBody.innerHTML = escaped;
+  } catch (err) {
+    outputBody.textContent = `ERROR: ${err.message}`;
+  }
+}
+
+async function doServicePortForward(svc, port) {
+  closeSvcMenu();
+  outputTitle.textContent = `PORT-FORWARD  svc/${svc.namespace}/${svc.name}:${port}`;
+  outputBody.textContent = 'Starting port-forward...';
+  outputPanel.style.display = 'flex';
+
+  try {
+    const resp = await fetch('/api/service/portforward', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ namespace: svc.namespace, name: svc.name, port }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+
+    let out = '';
+    if (data.status === 'already_running') {
+      out += `Port-forward already active!\n\n`;
+    } else {
+      out += `Port-forward started successfully.\n\n`;
+    }
+    out += `  Service:    svc/${svc.namespace}/${svc.name}\n`;
+    out += `  Remote:     :${port}\n`;
+    out += `  Local:      http://localhost:${data.localPort}\n`;
+    out += `\nOpen http://localhost:${data.localPort} in your browser.\n`;
+    out += `\nTo stop: double-click service again or call DELETE /api/service/portforward\n`;
+
+    const escaped = out.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const withLinks = escaped.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" style="color:#44ccaa;text-decoration:underline;pointer-events:auto;cursor:pointer">$1</a>');
+    outputBody.innerHTML = withLinks;
+  } catch (err) {
+    outputBody.textContent = `ERROR: ${err.message}`;
+  }
+}
+
+function closePodMenu() {
+  podMenu.style.display = 'none';
+  selectedPod = null;
+}
+
+function closeOutputPanel() {
+  outputPanel.style.display = 'none';
+  outputBody.textContent = '';
+  if (logAbort) { logAbort.abort(); logAbort = null; }
+}
+
+function closeKillConfirm() {
+  killConfirm.style.display = 'none';
+}
+
+canvas.addEventListener('dblclick', (e) => {
+  const dblMouse = new THREE.Vector2(
+    (e.clientX / window.innerWidth) * 2 - 1,
+    -(e.clientY / window.innerHeight) * 2 + 1,
+  );
+  const dblRay = new THREE.Raycaster();
+  dblRay.setFromCamera(dblMouse, activeCamera());
+
+  // Collect pod, workload, and service meshes
+  const podMeshes = [];
+  const wlMeshes = [];
+  const svcMeshes = [];
+  scene.traverse((obj) => {
+    if (obj.isMesh && obj.userData.type === 'pod') podMeshes.push(obj);
+    if (obj.isMesh && obj.userData.type === 'workload') wlMeshes.push(obj);
+    if (obj.isMesh && obj.userData.type === 'service') svcMeshes.push(obj);
+  });
+
+  // Prioritize pod hits over service/workload hits
+  const podHits = dblRay.intersectObjects(podMeshes);
+  if (podHits.length > 0) {
+    const pod = podHits[0].object.userData.pod;
+    if (!pod) return;
+
+    selectedPod = { name: pod.name, namespace: pod.namespace, labels: pod.labels };
+    podMenuTitle.textContent = pod.name;
+
+    const urls = podURLs(pod);
+    const openUrlItem = document.getElementById('pod-menu-open-url');
+    if (urls.length > 0) {
+      openUrlItem.style.display = 'flex';
+      openUrlItem.dataset.urls = JSON.stringify(urls);
+    } else {
+      openUrlItem.style.display = 'none';
+    }
+
+    podMenu.style.left = e.clientX + 'px';
+    podMenu.style.top = e.clientY + 'px';
+    podMenu.style.display = 'block';
+    e.stopPropagation();
+    return;
+  }
+
+  // Check service hits
+  const svcHits = dblRay.intersectObjects(svcMeshes);
+  if (svcHits.length > 0) {
+    const svc = svcHits[0].object.userData.service;
+    if (!svc) return;
+    selectedService = { name: svc.name, namespace: svc.namespace, ports: svc.ports || [] };
+    svcMenuTitle.textContent = `svc/${svc.name}`;
+    // Show/hide port-forward items based on ports
+    const pfContainer = document.getElementById('svc-menu-pf-ports');
+    pfContainer.innerHTML = '';
+    for (const p of (svc.ports || [])) {
+      const item = document.createElement('div');
+      item.className = 'menu-item';
+      item.style.color = '#44ccaa';
+      item.innerHTML = `<span class="menu-key" style="border-color:#44ccaa;color:#44ccaa">P</span> Port-forward :${p.port}`;
+      item.addEventListener('click', () => doServicePortForward(svc, p.port));
+      pfContainer.appendChild(item);
+    }
+    svcMenu.style.left = e.clientX + 'px';
+    svcMenu.style.top = e.clientY + 'px';
+    svcMenu.style.display = 'block';
+    e.stopPropagation();
+    return;
+  }
+
+  // Check workload hits
+  const wlHits = dblRay.intersectObjects(wlMeshes);
+  if (wlHits.length > 0) {
+    const wl = wlHits[0].object.userData.workload;
+    if (!wl) return;
+    openWorkloadEdit(wl);
+    e.stopPropagation();
+    return;
+  }
+});
+
+// Close menu on click outside (but not when clicking on the output panel or the menu itself)
+document.addEventListener('click', (e) => {
+  if (podMenu.style.display === 'block' && !podMenu.contains(e.target) && !outputPanel.contains(e.target)) {
+    closePodMenu();
+    closeOutputPanel();
+  }
+  if (svcMenu.style.display === 'block' && !svcMenu.contains(e.target) && !outputPanel.contains(e.target)) {
+    closeSvcMenu();
+    closeOutputPanel();
+  }
+  if (wlEditPanel.style.display === 'block' && !wlEditPanel.contains(e.target)) {
+    closeWorkloadEdit();
+  }
+});
+
+// Highlight active menu item
+function setActiveMenuItem(id) {
+  podMenu.querySelectorAll('.menu-item').forEach(el => el.style.background = '');
+  if (id) {
+    const el = document.getElementById(id);
+    if (el) el.style.background = 'rgba(0, 255, 136, 0.15)';
+  }
+}
+
+// Reposition pod menu to left side so it doesn't overlap with output panel
+function repositionPodMenu() {
+  if (podMenu.style.display !== 'block') return;
+  const menuRect = podMenu.getBoundingClientRect();
+  // Keep menu on left half when output panel is open
+  if (outputPanel.style.display === 'flex') {
+    const maxX = window.innerWidth * 0.5 - menuRect.width - 10;
+    if (menuRect.left > maxX) {
+      podMenu.style.left = Math.max(10, maxX) + 'px';
+    }
+  }
+}
+
+// Menu item clicks — keep menu open for describe/logs, close for kill/url
+document.getElementById('pod-menu-describe').addEventListener('click', () => {
+  if (selectedPod) { doPodDescribe(selectedPod); setActiveMenuItem('pod-menu-describe'); repositionPodMenu(); }
+});
+document.getElementById('pod-menu-logs').addEventListener('click', () => {
+  if (selectedPod) { doPodLogs(selectedPod); setActiveMenuItem('pod-menu-logs'); repositionPodMenu(); }
+});
+document.getElementById('pod-menu-kill').addEventListener('click', () => {
+  if (selectedPod) showKillConfirm(selectedPod);
+  closePodMenu();
+});
+document.getElementById('pod-menu-open-url').addEventListener('click', () => {
+  const openUrlItem = document.getElementById('pod-menu-open-url');
+  const urls = JSON.parse(openUrlItem.dataset.urls || '[]');
+  for (const url of urls) window.open(url, '_blank');
+});
+
 // ── Ingress arch click → route list panel ──────────────────────
 const ingressPanel = document.getElementById('ingress-panel');
 
@@ -2315,97 +2938,549 @@ document.addEventListener('click', (e) => {
   }
 });
 
-// ── Pod animation ──────────────────────────────────────────────
-function animatePods(time) {
-  for (const [, ns] of state.namespaces) {
-    let i = 0;
-    for (const [, mesh] of ns.pods) {
-      const pod = mesh.userData.pod;
-      const h = mesh.geometry.parameters.height || POD_BASE_SIZE;
-      if (pod && pod.status === 'Running') {
-        mesh.position.y = POD_Y_OFFSET + h / 2 + Math.sin(time * 2 + i * 0.5) * 0.05;
-      } else if (pod && (pod.status === 'CrashLoopBackOff' || pod.status === 'Error')) {
-        mesh.position.y = POD_Y_OFFSET + h / 2 + Math.sin(time * 8 + i) * 0.15;
+// Keyboard shortcuts when menu is open
+document.addEventListener('keydown', (e) => {
+  // Kill confirm dialog
+  if (killConfirm.style.display === 'block') {
+    if (e.key === 'y' || e.key === 'Y') { doKillPod(); return; }
+    if (e.key === 'n' || e.key === 'N' || e.key === 'Escape') { closeKillConfirm(); return; }
+    return;
+  }
+
+  // Ingress panel
+  if (ingressPanel.style.display === 'block') {
+    if (e.key === 'Escape') { closeIngressPanel(); return; }
+  }
+
+  // Workload edit panel
+  if (wlEditPanel.style.display === 'block') {
+    if (e.key === 'Escape') { closeWorkloadEdit(); return; }
+  }
+
+  // Output panel
+  if (outputPanel.style.display === 'flex') {
+    if (e.key === 'Escape') { closeOutputPanel(); return; }
+  }
+
+  // Service menu shortcuts — D/E keep menu open, Escape closes it
+  if (svcMenu.style.display === 'block' && selectedService) {
+    if (e.key === 'd' || e.key === 'D') { doServiceDescribe(selectedService); return; }
+    if (e.key === 'e' || e.key === 'E') { doServiceEndpoints(selectedService); return; }
+    if (e.key === 'Escape') { closeSvcMenu(); closeOutputPanel(); return; }
+  }
+
+  // Pod menu shortcuts — D/L keep menu open, K/Escape close it
+  if (podMenu.style.display === 'block' && selectedPod) {
+    if (e.key === 'd' || e.key === 'D') { doPodDescribe(selectedPod); setActiveMenuItem('pod-menu-describe'); repositionPodMenu(); return; }
+    if (e.key === 'l' || e.key === 'L') { doPodLogs(selectedPod); setActiveMenuItem('pod-menu-logs'); repositionPodMenu(); return; }
+    if (e.key === 'k' || e.key === 'K') { showKillConfirm(selectedPod); closePodMenu(); return; }
+    if (e.key === 'o' || e.key === 'O') {
+      const openUrlItem = document.getElementById('pod-menu-open-url');
+      if (openUrlItem.style.display !== 'none') {
+        const urls = JSON.parse(openUrlItem.dataset.urls || '[]');
+        for (const url of urls) window.open(url, '_blank');
       }
-      i++;
+      return;
+    }
+    if (e.key === 'Escape') { closePodMenu(); closeOutputPanel(); return; }
+  }
+});
+
+// Close output panel
+outputClose.addEventListener('click', closeOutputPanel);
+
+async function doPodDescribe(pod) {
+  closeOutputPanel();
+  outputTitle.textContent = `DESCRIBE  ${pod.namespace}/${pod.name}`;
+  outputBody.textContent = 'Loading...';
+  outputPanel.style.display = 'flex';
+
+  try {
+    const resp = await fetch(`/api/pod/describe?namespace=${encodeURIComponent(pod.namespace)}&name=${encodeURIComponent(pod.name)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const desc = await resp.json();
+
+    let out = '';
+    out += `Name:       ${desc.name}\n`;
+    out += `Namespace:  ${desc.namespace}\n`;
+    out += `Node:       ${desc.node}\n`;
+    out += `Status:     ${desc.status}\n`;
+    out += `IP:         ${desc.ip}\n`;
+    if (desc.startTime) out += `Start Time: ${desc.startTime}\n`;
+    if (desc.labels && Object.keys(desc.labels).length) {
+      out += `Labels:\n`;
+      for (const [k, v] of Object.entries(desc.labels)) {
+        out += `  ${k}=${v}\n`;
+      }
+    }
+    out += `\n--- CONTAINERS ---\n`;
+    for (const c of (desc.containers || [])) {
+      out += `\n  ${c.name}\n`;
+      out += `    Image:    ${c.image}\n`;
+      out += `    Ready:    ${c.ready}\n`;
+      out += `    Restarts: ${c.restartCount}\n`;
+      out += `    State:    ${c.state}${c.reason ? ' (' + c.reason + ')' : ''}\n`;
+    }
+    out += `\n--- CONDITIONS ---\n`;
+    for (const cond of (desc.conditions || [])) {
+      out += `  ${cond}\n`;
+    }
+    if (desc.events && desc.events.length) {
+      out += `\n--- EVENTS ---\n`;
+      for (const ev of desc.events) {
+        out += `  ${ev}\n`;
+      }
+    }
+
+    // Resolve URLs for this pod
+    const urls = podURLs({ ...pod, labels: desc.labels });
+    if (urls.length) {
+      out += `\n--- URLS ---\n`;
+      for (const u of urls) {
+        out += `  ${u}\n`;
+      }
+    }
+
+    // Render with clickable URLs
+    const escaped = out.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const withLinks = escaped.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" style="color:#ffaa00;text-decoration:underline;pointer-events:auto;cursor:pointer">$1</a>');
+    outputBody.innerHTML = withLinks;
+  } catch (err) {
+    outputBody.textContent = `ERROR: ${err.message}`;
+  }
+}
+
+async function doPodLogs(pod) {
+  closeOutputPanel();
+  if (logAbort) logAbort.abort();
+  logAbort = new AbortController();
+
+  outputTitle.textContent = `LOGS  ${pod.namespace}/${pod.name}  (streaming)`;
+  outputBody.textContent = '';
+  outputPanel.style.display = 'flex';
+
+  try {
+    const resp = await fetch(
+      `/api/pod/logs?namespace=${encodeURIComponent(pod.namespace)}&name=${encodeURIComponent(pod.name)}`,
+      { signal: logAbort.signal },
+    );
+    if (!resp.ok) throw new Error(await resp.text());
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      // Parse SSE lines
+      for (const line of chunk.split('\n')) {
+        if (line.startsWith('data: ')) {
+          outputBody.textContent += line.slice(6) + '\n';
+          // Auto-scroll to bottom
+          outputBody.scrollTop = outputBody.scrollHeight;
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      outputBody.textContent += `\n--- ERROR: ${err.message} ---\n`;
     }
   }
 }
 
-// ── Depth transparency ─────────────────────────────────────────
-const DEPTH_FADE_START = 60;
-const DEPTH_FADE_END = 250;
-const DEPTH_MIN_OPACITY = 0.25;
+let pendingKillPod = null;
 
-const BASE_PLATFORM_OPACITY = 0.85;
-const BASE_POD_OPACITY = 0.9;
-const BASE_LABEL_OPACITY = 0.9;
-
-function depthOpacityFactor(distance) {
-  if (distance <= DEPTH_FADE_START) return 1;
-  if (distance >= DEPTH_FADE_END) return DEPTH_MIN_OPACITY;
-  const t = (distance - DEPTH_FADE_START) / (DEPTH_FADE_END - DEPTH_FADE_START);
-  return 1 - t * (1 - DEPTH_MIN_OPACITY);
+function showKillConfirm(pod) {
+  pendingKillPod = pod;
+  killPodName.textContent = `${pod.namespace}/${pod.name}`;
+  killConfirm.style.display = 'block';
 }
 
-const _depthTmpVec = new THREE.Vector3();
-const _lastCamPos = new THREE.Vector3();
-let _depthDirty = true;
+killYes.addEventListener('click', doKillPod);
+killNo.addEventListener('click', closeKillConfirm);
 
-function markDepthDirty() { _depthDirty = true; }
+async function doKillPod() {
+  if (!pendingKillPod) return;
+  const pod = pendingKillPod;
+  closeKillConfirm();
 
-function updateDepthTransparency() {
-  const camPos = activeCamera().position;
-  // Skip if camera hasn't moved significantly
-  if (!_depthDirty && _lastCamPos.distanceToSquared(camPos) < 0.01) return;
-  _lastCamPos.copy(camPos);
-  _depthDirty = false;
+  closeOutputPanel();
+  outputTitle.textContent = `KILL  ${pod.namespace}/${pod.name}`;
+  outputBody.textContent = 'Deleting pod...';
+  outputPanel.style.display = 'flex';
 
-  for (const [, ns] of state.namespaces) {
-    ns.group.getWorldPosition(_depthTmpVec);
-    const dist = eagleEye.active ? 0 : camPos.distanceTo(_depthTmpVec);
-    const f = depthOpacityFactor(dist);
+  try {
+    const resp = await fetch(
+      `/api/pod/delete?namespace=${encodeURIComponent(pod.namespace)}&name=${encodeURIComponent(pod.name)}`,
+      { method: 'DELETE' },
+    );
+    if (!resp.ok) throw new Error(await resp.text());
+    const result = await resp.json();
+    outputBody.textContent = `Pod ${result.namespace}/${result.pod} deleted successfully.`;
+  } catch (err) {
+    outputBody.textContent = `ERROR: ${err.message}`;
+  }
+  pendingKillPod = null;
+}
 
-    if (ns.platform) ns.platform.material.opacity = BASE_PLATFORM_OPACITY * f;
-    if (ns.label) ns.label.material.opacity = BASE_LABEL_OPACITY * f;
+// ── Workload Edit Panel ────────────────────────────────────────
+const wlEditPanel = document.getElementById('wl-edit-panel');
+const wlEditTitle = document.getElementById('wl-edit-title');
+const wlReplicaVal = document.getElementById('wl-replica-val');
+const wlReadyVal = document.getElementById('wl-ready-val');
+const wlContainers = document.getElementById('wl-containers');
+const wlEditStatus = document.getElementById('wl-edit-status');
 
-    for (const [, mesh] of ns.pods) {
-      mesh.material.opacity = BASE_POD_OPACITY * f;
-    }
+let editingWorkload = null;
+
+function closeWorkloadEdit() {
+  wlEditPanel.style.display = 'none';
+  editingWorkload = null;
+  wlEditStatus.style.display = 'none';
+}
+
+function showWlStatus(msg, isError) {
+  wlEditStatus.textContent = msg;
+  wlEditStatus.className = isError ? 'error' : 'success';
+  wlEditStatus.style.display = 'block';
+  if (!isError) setTimeout(() => { wlEditStatus.style.display = 'none'; }, 3000);
+}
+
+// ── Friendly cron schedule helpers ──────────────────────────────
+const CRON_PRESETS = [
+  { label: 'Every minute',      cron: '* * * * *' },
+  { label: 'Every 5 minutes',   cron: '*/5 * * * *' },
+  { label: 'Every 15 minutes',  cron: '*/15 * * * *' },
+  { label: 'Every 30 minutes',  cron: '*/30 * * * *' },
+  { label: 'Every hour',        cron: '0 * * * *' },
+  { label: 'Every 6 hours',     cron: '0 */6 * * *' },
+  { label: 'Every 12 hours',    cron: '0 */12 * * *' },
+  { label: 'Daily at midnight', cron: '0 0 * * *' },
+  { label: 'Daily at 6:00',     cron: '0 6 * * *' },
+  { label: 'Weekly (Mon 00:00)',cron: '0 0 * * 1' },
+  { label: 'Monthly (1st 00:00)',cron: '0 0 1 * *' },
+];
+
+function cronToHuman(cron) {
+  if (!cron) return '?';
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length < 5) return cron;
+  const [min, hour, dom, mon, dow] = parts;
+
+  // Check presets first
+  for (const p of CRON_PRESETS) {
+    if (p.cron === cron.trim()) return p.label;
   }
 
-  // Node island
-  if (state.nodeIsland) {
-    state.nodeIsland.group.getWorldPosition(_depthTmpVec);
-    const dist = eagleEye.active ? 0 : camPos.distanceTo(_depthTmpVec);
-    const f = depthOpacityFactor(dist);
-    if (state.nodeIsland.platform) state.nodeIsland.platform.material.opacity = BASE_PLATFORM_OPACITY * f;
-    if (state.nodeIsland.label) state.nodeIsland.label.material.opacity = BASE_LABEL_OPACITY * f;
-    for (const [, mesh] of state.nodeIsland.blocks) {
-      mesh.material.opacity = BASE_POD_OPACITY * f;
+  // Build a rough human description
+  let desc = '';
+  if (min === '*' && hour === '*') desc = 'Every minute';
+  else if (min.startsWith('*/') && hour === '*') desc = `Every ${min.slice(2)} min`;
+  else if (hour.startsWith('*/') && min === '0') desc = `Every ${hour.slice(2)}h`;
+  else if (hour !== '*' && min !== '*') desc = `At ${hour.padStart(2,'0')}:${min.padStart(2,'0')}`;
+  else desc = cron;
+
+  if (dom !== '*') desc += ` on day ${dom}`;
+  if (mon !== '*') desc += ` in month ${mon}`;
+  if (dow !== '*') {
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const d = parseInt(dow, 10);
+    desc += ` on ${days[d] || dow}`;
+  }
+  return desc;
+}
+
+function renderCronEditor(schedule) {
+  let html = '<div class="wl-section-title">SCHEDULE</div>';
+  // Human-readable display
+  html += `<div style="font-size:16px;font-weight:bold;color:#ffaa00;margin-bottom:8px">${cronToHuman(schedule)}</div>`;
+  // Editable cron expression
+  html += `<div class="wl-res-grid" style="grid-template-columns:1fr;margin-bottom:10px">`;
+  html += `<div class="wl-res-field"><label>CRON EXPRESSION</label><input type="text" id="wl-cron-input" value="${schedule || ''}" style="font-size:14px;color:#ffaa00;border-color:rgba(255,170,0,0.3)"></div>`;
+  html += `</div>`;
+  // Preset buttons
+  html += `<div class="wl-section-title">QUICK PRESETS</div>`;
+  html += `<div style="display:flex;flex-wrap:wrap;gap:4px">`;
+  for (const p of CRON_PRESETS) {
+    const active = p.cron === schedule?.trim();
+    html += `<button class="wl-cron-preset" data-cron="${p.cron}" style="padding:3px 8px;font-size:10px;border:1px solid ${active ? '#ffaa00' : 'rgba(255,170,0,0.3)'};background:${active ? 'rgba(255,170,0,0.15)' : 'transparent'};color:#ffaa00;font-family:inherit;cursor:pointer">${p.label}</button>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+async function openWorkloadEdit(wl) {
+  closeWorkloadEdit();
+  editingWorkload = { ...wl };
+
+  const WL_ABBREV = { Deployment: 'deploy', StatefulSet: 'sts', DaemonSet: 'ds', CronJob: 'cj', Job: 'job' };
+  const abbrev = WL_ABBREV[wl.kind] || wl.kind.toLowerCase();
+  wlEditTitle.textContent = `${abbrev}/${wl.name}`;
+
+  // Show/hide sections based on kind
+  const replicaSection = wlReplicaVal.closest('.wl-section');
+  const actionsDiv = document.querySelector('#wl-edit-panel .wl-actions');
+  const applyBtn = document.getElementById('wl-apply-btn');
+  const restartBtn = document.getElementById('wl-restart-btn');
+  const scaleZeroBtn = document.getElementById('wl-scale-zero-btn');
+
+  const isCronJob = wl.kind === 'CronJob';
+  const isJob = wl.kind === 'Job';
+  const isDaemonSet = wl.kind === 'DaemonSet';
+
+  // Replicas section: hide for CronJob/Job, show for others
+  replicaSection.style.display = (isCronJob || isJob) ? 'none' : '';
+  // Scale to 0: hide for CronJob/Job/DaemonSet
+  scaleZeroBtn.style.display = (isCronJob || isJob || isDaemonSet) ? 'none' : '';
+  // Restart: available for Deployment/StatefulSet/DaemonSet
+  restartBtn.style.display = (isCronJob || isJob) ? 'none' : '';
+
+  if (!isCronJob && !isJob) {
+    wlReplicaVal.textContent = wl.replicas || 0;
+    wlReadyVal.textContent = wl.readyReplicas || 0;
+  }
+
+  wlContainers.innerHTML = '<div style="opacity:0.5">Loading...</div>';
+  wlEditPanel.style.display = 'block';
+
+  // Fetch full details
+  try {
+    const resp = await fetch(`/api/workload/describe?namespace=${encodeURIComponent(wl.namespace)}&name=${encodeURIComponent(wl.name)}&kind=${encodeURIComponent(wl.kind)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const desc = await resp.json();
+
+    editingWorkload.replicas = desc.replicas;
+    editingWorkload.containers = desc.containers;
+    editingWorkload.schedule = desc.schedule;
+    editingWorkload.suspended = desc.suspended;
+
+    if (!isCronJob && !isJob) {
+      wlReplicaVal.textContent = desc.replicas;
+      wlReadyVal.textContent = desc.readyReplicas;
     }
+
+    let html = '';
+
+    // CronJob: schedule editor + suspend/trigger buttons
+    if (isCronJob) {
+      html += `<div style="padding:0 0 8px 0">${renderCronEditor(desc.schedule)}</div>`;
+
+      // Suspend status + toggle
+      html += `<div style="margin:8px 0;display:flex;align-items:center;gap:10px">`;
+      html += `<span style="font-size:12px;opacity:0.6">STATUS:</span>`;
+      html += `<span style="color:${desc.suspended ? '#ff4444' : '#00ff88'};font-weight:bold">${desc.suspended ? 'SUSPENDED' : 'ACTIVE'}</span>`;
+      html += `<button id="wl-cj-suspend" class="wl-action-btn ${desc.suspended ? '' : 'warn'}" style="font-size:11px;padding:3px 10px">${desc.suspended ? 'RESUME' : 'SUSPEND'}</button>`;
+      html += `<button id="wl-cj-trigger" class="wl-action-btn" style="font-size:11px;padding:3px 10px;color:#00aaff;border-color:#00aaff">TRIGGER NOW</button>`;
+      html += `</div>`;
+
+      if (desc.lastSchedule) {
+        const ago = ((Date.now() - new Date(desc.lastSchedule).getTime()) / 1000 / 60).toFixed(0);
+        html += `<div style="font-size:11px;opacity:0.5;margin-bottom:6px">Last scheduled: ${ago}min ago (${desc.activeJobs} active jobs)</div>`;
+      }
+
+      // Change Apply to "Save Schedule" for CronJobs
+      applyBtn.textContent = 'SAVE SCHEDULE';
+    } else {
+      applyBtn.textContent = 'APPLY';
+    }
+
+    // Container resource fields (for all kinds)
+    if (desc.containers && desc.containers.length > 0) {
+      html += `<div class="wl-section-title" style="margin-top:8px">CONTAINER RESOURCES</div>`;
+      for (const c of desc.containers) {
+        html += `<div class="wl-container" data-container="${c.name}">`;
+        html += `<div class="wl-container-name">${c.name}</div>`;
+        html += `<div class="wl-res-grid">`;
+        html += `<div class="wl-res-field"><label>CPU REQ</label><input type="text" data-field="cpuRequest" value="${c.cpuRequest || ''}"></div>`;
+        html += `<div class="wl-res-field"><label>CPU LIM</label><input type="text" data-field="cpuLimit" value="${c.cpuLimit || ''}"></div>`;
+        html += `<div class="wl-res-field"><label>MEM REQ</label><input type="text" data-field="memoryRequest" value="${c.memoryRequest || ''}"></div>`;
+        html += `<div class="wl-res-field"><label>MEM LIM</label><input type="text" data-field="memoryLimit" value="${c.memoryLimit || ''}"></div>`;
+        html += `</div></div>`;
+      }
+    }
+
+    wlContainers.innerHTML = html;
+
+    // Wire up CronJob-specific buttons
+    if (isCronJob) {
+      // Preset buttons
+      wlContainers.querySelectorAll('.wl-cron-preset').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const cronInput = document.getElementById('wl-cron-input');
+          if (cronInput) cronInput.value = btn.dataset.cron;
+          // Update all preset highlights
+          wlContainers.querySelectorAll('.wl-cron-preset').forEach(b => {
+            b.style.borderColor = b.dataset.cron === btn.dataset.cron ? '#ffaa00' : 'rgba(255,170,0,0.3)';
+            b.style.background = b.dataset.cron === btn.dataset.cron ? 'rgba(255,170,0,0.15)' : 'transparent';
+          });
+        });
+      });
+
+      // Suspend/Resume
+      const suspendBtn = document.getElementById('wl-cj-suspend');
+      if (suspendBtn) {
+        suspendBtn.addEventListener('click', async () => {
+          try {
+            const newSuspended = !editingWorkload.suspended;
+            const resp = await fetch('/api/cronjob/suspend', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ namespace: wl.namespace, name: wl.name, suspended: newSuspended }),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            editingWorkload.suspended = newSuspended;
+            showWlStatus(newSuspended ? 'CronJob suspended' : 'CronJob resumed', false);
+            // Refresh panel
+            openWorkloadEdit(editingWorkload);
+          } catch (err) {
+            showWlStatus(`Error: ${err.message}`, true);
+          }
+        });
+      }
+
+      // Trigger now
+      const triggerBtn = document.getElementById('wl-cj-trigger');
+      if (triggerBtn) {
+        triggerBtn.addEventListener('click', async () => {
+          try {
+            const resp = await fetch('/api/cronjob/trigger', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ namespace: wl.namespace, name: wl.name }),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const result = await resp.json();
+            showWlStatus(`Job ${result.job} triggered`, false);
+          } catch (err) {
+            showWlStatus(`Error: ${err.message}`, true);
+          }
+        });
+      }
+    }
+  } catch (err) {
+    wlContainers.innerHTML = `<div style="color:#ff4444">Failed: ${err.message}</div>`;
   }
 }
 
-// ── Billboard labels (face camera) ────────────────────────────
-let _billboardMeshes = [];
-let _billboardCacheDirty = true;
+// Replica +/- buttons
+document.getElementById('wl-replica-minus').addEventListener('click', () => {
+  if (!editingWorkload) return;
+  const cur = parseInt(wlReplicaVal.textContent, 10);
+  if (cur > 0) wlReplicaVal.textContent = cur - 1;
+});
+document.getElementById('wl-replica-plus').addEventListener('click', () => {
+  if (!editingWorkload) return;
+  const cur = parseInt(wlReplicaVal.textContent, 10);
+  wlReplicaVal.textContent = cur + 1;
+});
 
-function invalidateBillboardCache() { _billboardCacheDirty = true; }
+// Apply button — handles both scale/resources AND cronjob schedule
+document.getElementById('wl-apply-btn').addEventListener('click', async () => {
+  if (!editingWorkload) return;
+  const wl = editingWorkload;
 
-function updateBillboards() {
-  const cam = activeCamera();
-  if (_billboardCacheDirty) {
-    _billboardMeshes = [];
-    scene.traverse((obj) => {
-      if (obj.isMesh && obj.userData.billboard) _billboardMeshes.push(obj);
+  try {
+    // CronJob: save schedule
+    if (wl.kind === 'CronJob') {
+      const cronInput = document.getElementById('wl-cron-input');
+      const newSchedule = cronInput ? cronInput.value.trim() : '';
+      if (newSchedule && newSchedule !== wl.schedule) {
+        const resp = await fetch('/api/cronjob/schedule', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ namespace: wl.namespace, name: wl.name, schedule: newSchedule }),
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        editingWorkload.schedule = newSchedule;
+      }
+      showWlStatus('Schedule saved', false);
+      return;
+    }
+
+    // Scale if changed (Deployment/StatefulSet)
+    const newReplicas = parseInt(wlReplicaVal.textContent, 10);
+    if (newReplicas !== wl.replicas && wl.kind !== 'Job' && wl.kind !== 'DaemonSet') {
+      const resp = await fetch('/api/workload/scale', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ namespace: wl.namespace, name: wl.name, kind: wl.kind, replicas: newReplicas }),
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+    }
+
+    // Collect container resources from inputs
+    const containerEls = wlContainers.querySelectorAll('.wl-container');
+    if (containerEls.length > 0) {
+      const containers = [];
+      let changed = false;
+      containerEls.forEach(el => {
+        const name = el.dataset.container;
+        const orig = wl.containers?.find(c => c.name === name);
+        const c = { name };
+        for (const field of ['cpuRequest', 'cpuLimit', 'memoryRequest', 'memoryLimit']) {
+          const input = el.querySelector(`input[data-field="${field}"]`);
+          c[field] = input ? input.value.trim() : '';
+          if (orig && c[field] !== (orig[field] || '')) changed = true;
+        }
+        containers.push(c);
+      });
+
+      if (changed) {
+        const resp = await fetch('/api/workload/resources', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ namespace: wl.namespace, name: wl.name, kind: wl.kind, containers }),
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+      }
+    }
+
+    showWlStatus('Applied successfully', false);
+    editingWorkload.replicas = newReplicas;
+  } catch (err) {
+    showWlStatus(`Error: ${err.message}`, true);
+  }
+});
+
+// Restart button
+document.getElementById('wl-restart-btn').addEventListener('click', async () => {
+  if (!editingWorkload) return;
+  const wl = editingWorkload;
+  try {
+    const resp = await fetch('/api/workload/restart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ namespace: wl.namespace, name: wl.name, kind: wl.kind }),
     });
-    _billboardCacheDirty = false;
+    if (!resp.ok) throw new Error(await resp.text());
+    showWlStatus('Rolling restart initiated', false);
+  } catch (err) {
+    showWlStatus(`Error: ${err.message}`, true);
   }
-  for (const mesh of _billboardMeshes) {
-    mesh.quaternion.copy(cam.quaternion);
+});
+
+// Scale to 0 button
+document.getElementById('wl-scale-zero-btn').addEventListener('click', async () => {
+  if (!editingWorkload) return;
+  const wl = editingWorkload;
+  try {
+    const resp = await fetch('/api/workload/scale', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ namespace: wl.namespace, name: wl.name, kind: wl.kind, replicas: 0 }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    wlReplicaVal.textContent = '0';
+    editingWorkload.replicas = 0;
+    showWlStatus('Scaled to 0', false);
+  } catch (err) {
+    showWlStatus(`Error: ${err.message}`, true);
   }
-}
+});
+
+// Close workload edit panel
+document.getElementById('wl-edit-close').addEventListener('click', closeWorkloadEdit);
 
 // ── Resize ─────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
