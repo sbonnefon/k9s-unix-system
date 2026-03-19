@@ -2034,7 +2034,7 @@ function invalidateMeshCache() {
   _billboardCacheDirty = true;
 }
 
-const HOVERABLE_TYPES = new Set(['pod', 'nodeBlock', 'namespace', 'service']);
+const HOVERABLE_TYPES = new Set(['pod', 'nodeBlock', 'resource', 'workload', 'pvc', 'ingressArch', 'namespace', 'service']);
 
 function rebuildMeshCache() {
   if (!_meshCacheDirty) return;
@@ -2044,7 +2044,7 @@ function rebuildMeshCache() {
     if (obj.isMesh && HOVERABLE_TYPES.has(obj.userData.type)) {
       _cachedHoverTargets.push(obj);
     }
-    if (obj.userData.type === 'namespace' || obj.userData.type === 'label') {
+    if (obj.userData.type === 'namespace' || obj.userData.type === 'label' || obj.userData.type === 'ingressArch') {
       _cachedNsTargets.push(obj);
     }
   });
@@ -2080,6 +2080,135 @@ function removeHoverHighlight(mesh) {
   _hoverSavedState = null;
 }
 
+function buildTooltipHTML(mesh) {
+  const ud = mesh.userData;
+  switch (ud.type) {
+    case 'pod': {
+      const pod = ud.pod;
+      const statusClass = pod.status === 'Running' ? 'status-running'
+        : ['Pending', 'ContainerCreating', 'PodInitializing'].includes(pod.status) ? 'status-pending'
+        : 'status-error';
+      const matchedSvcs = state.services
+        .filter(s => s.namespace === pod.namespace && selectorMatchesLabels(s.selector, pod.labels))
+        .map(s => s.name);
+      return `
+        <div class="pod-name">${pod.name}</div>
+        <div class="pod-ns">ns/${pod.namespace}${pod.nodeName ? ' · node/' + pod.nodeName : ''}</div>
+        ${pod.ownerKind ? `<div style="opacity:0.8">${pod.ownerKind}/${pod.ownerName}</div>` : ''}
+        <div class="pod-status ${statusClass}">● ${pod.status}</div>
+        <div>Ready: ${pod.ready ? 'YES' : 'NO'} &middot; Restarts: ${pod.restarts} &middot; Containers: ${pod.containerCount || 1}</div>
+        ${pod.cpuRequest || pod.memoryRequest ? `<div>CPU: ${pod.cpuRequest ? pod.cpuRequest + 'm' : '—'} &middot; Mem: ${pod.memoryRequest ? formatBytes(pod.memoryRequest) : '—'}</div>` : ''}
+        ${matchedSvcs.length ? `<div style="color:#00aaff">svc/${matchedSvcs.join(', svc/')}</div>` : ''}
+        ${pod.pvcNames && pod.pvcNames.length ? `<div style="color:#8844cc">pvc/${pod.pvcNames.join(', pvc/')}</div>` : ''}
+        ${(() => { const u = podURLs(pod); return u.length ? `<div style="color:#ffaa00">${u.join(', ')}</div>` : ''; })()}
+        <div>Age: ${pod.age}</div>
+        <div style="opacity:0.5; margin-top:4px">Double-click for actions</div>
+      `;
+    }
+    case 'nodeBlock': {
+      const node = ud.node;
+      const statusClass = node.status === 'Ready' ? 'status-running' : 'status-error';
+      return `
+        <div class="pod-name">${node.name}</div>
+        <div class="pod-ns">node</div>
+        <div class="pod-status ${statusClass}">● ${node.status}</div>
+        ${node.cpuCapacity ? `<div>CPU: ${node.cpuCapacity}m &middot; Mem: ${formatBytes(node.memoryCapacity)}</div>` : ''}
+      `;
+    }
+    case 'resource': {
+      const res = ud.resource;
+      const color = '#' + new THREE.Color(RESOURCE_COLORS[res.kind] || 0x777777).getHexString();
+      const dataEntries = res.data ? Object.entries(res.data).map(([k, v]) => `<div style="opacity:0.7">${k}: ${v}</div>`).join('') : '';
+      return `
+        <div class="pod-name" style="color:${color}">${res.kind}</div>
+        <div class="pod-ns">${res.name}${res.namespace ? ' · ns/' + res.namespace : ' (cluster)'}</div>
+        ${dataEntries}
+      `;
+    }
+    case 'workload': {
+      const wl = ud.workload;
+      const WL_COLORS_HEX = { Deployment: '#00ff88', StatefulSet: '#00aaff', DaemonSet: '#44ccaa', CronJob: '#ffaa00', Job: '#ffcc66' };
+      const color = WL_COLORS_HEX[wl.kind] || '#00ff88';
+      let info = '';
+      if (wl.kind === 'CronJob') {
+        info = `<div>Schedule: ${wl.schedule || '?'}</div>`;
+        if (wl.suspended) info += `<div style="color:#ff4444">SUSPENDED</div>`;
+        if (wl.lastSchedule) info += `<div>Last: ${wl.lastSchedule}</div>`;
+        if (wl.activeJobs !== undefined) info += `<div>Active jobs: ${wl.activeJobs}</div>`;
+      } else if (wl.kind === 'Job') {
+        info = `<div>Completions: ${wl.readyReplicas}/${wl.replicas}</div>`;
+      } else {
+        const healthy = wl.readyReplicas >= wl.replicas;
+        info = `<div>Replicas: ${wl.readyReplicas}/${wl.replicas} ${healthy ? '' : '<span style="color:#ffcc00">NOT READY</span>'}</div>`;
+      }
+      return `
+        <div class="pod-name" style="color:${color}">${wl.kind}</div>
+        <div class="pod-ns">${wl.name} · ns/${wl.namespace}</div>
+        ${info}
+        <div style="opacity:0.5; margin-top:4px">Double-click to edit</div>
+      `;
+    }
+    case 'pvc': {
+      const pvc = ud.pvc;
+      const statusColor = pvc.status === 'Bound' ? '#8844cc' : pvc.status === 'Pending' ? '#ffcc00' : '#ff4444';
+      return `
+        <div class="pod-name" style="color:#8844cc">PersistentVolumeClaim</div>
+        <div class="pod-ns">${pvc.name} · ns/${pvc.namespace}</div>
+        <div style="color:${statusColor}">● ${pvc.status}</div>
+        ${pvc.capacity ? `<div>Capacity: ${pvc.capacity}</div>` : ''}
+        ${ud.podName ? `<div style="opacity:0.7">Mounted by: ${ud.podName}</div>` : ''}
+      `;
+    }
+    case 'ingressArch': {
+      const nsIngresses = ud.ingresses || [];
+      const routeCount = nsIngresses.reduce((n, ing) => n + (ing.rules || []).length, 0);
+      let routes = '';
+      for (const ing of nsIngresses.slice(0, 5)) {
+        for (const rule of (ing.rules || []).slice(0, 3)) {
+          routes += `<div style="opacity:0.7">${rule.host || '—'}${rule.path || '/'} → svc/${rule.serviceName || '?'}</div>`;
+        }
+      }
+      if (routeCount > 8) routes += `<div style="opacity:0.5">...and ${routeCount - 8} more</div>`;
+      return `
+        <div class="pod-name" style="color:#ffaa00">Ingress</div>
+        <div class="pod-ns">ns/${ud.namespace} · ${nsIngresses.length} ingress(es) · ${routeCount} route(s)</div>
+        ${routes}
+        <div style="opacity:0.5; margin-top:4px">Click for route details</div>
+      `;
+    }
+    case 'namespace': {
+      const nsName = ud.name;
+      if (nsName === '__nodes__') return null;
+      const ns = state.namespaces.get(nsName);
+      const podCount = ns ? ns.pods.size : 0;
+      const wlCount = state.workloads.filter(w => w.namespace === nsName).length;
+      const svcCount = state.services.filter(s => s.namespace === nsName).length;
+      const ingCount = state.ingresses.filter(i => i.namespace === nsName).length;
+      return `
+        <div class="pod-name" style="color:#cc6699">${nsName}</div>
+        <div class="pod-ns">namespace</div>
+        <div>${podCount} pod(s) &middot; ${wlCount} workload(s)</div>
+        <div>${svcCount} service(s) &middot; ${ingCount} ingress(es)</div>
+        <div style="opacity:0.5; margin-top:4px">Click to spotlight</div>
+      `;
+    }
+    case 'service': {
+      const svc = ud.service;
+      const portsStr = (svc.ports || []).map(p => `${p.port}${p.name ? '/' + p.name : ''} → ${p.targetPort} (${p.protocol})`).join('<br>');
+      return `
+        <div class="pod-name" style="color:#00aaff">Service</div>
+        <div class="pod-ns">${svc.name} · ns/${svc.namespace}</div>
+        <div>Type: ${svc.type} &middot; ClusterIP: ${svc.clusterIP || 'None'}</div>
+        ${portsStr ? `<div style="opacity:0.8">${portsStr}</div>` : ''}
+        <div style="opacity:0.7">${ud.matchedPodCount || 0} matching pod(s)</div>
+        <div style="opacity:0.5; margin-top:4px">Double-click for actions</div>
+      `;
+    }
+    default:
+      return null;
+  }
+}
+
 function updateRaycast() {
   if (!_mouseDirty) return;
   _mouseDirty = false;
@@ -2087,7 +2216,7 @@ function updateRaycast() {
   rebuildMeshCache();
   raycaster.setFromCamera(mouse, activeCamera());
 
-  // Cursor hint for clickable namespace labels/platforms
+  // Cursor hint for clickable targets
   if (!pointerLocked) {
     const nsHits = raycaster.intersectObjects(_cachedNsTargets);
     canvas.style.cursor = nsHits.length > 0 ? 'pointer' : 'default';
@@ -2105,29 +2234,9 @@ function updateRaycast() {
     applyHoverHighlight(hoveredMesh);
     canvas.style.cursor = 'pointer';
 
-    if (hoveredMesh.userData.type === 'nodeBlock') {
-      const node = hoveredMesh.userData.node;
-      const statusClass = node.status === 'Ready' ? 'status-running' : 'status-error';
-      tooltip.innerHTML = `
-        <div class="pod-name">${node.name}</div>
-        <div class="pod-ns">node</div>
-        <div class="pod-status ${statusClass}">● ${node.status}</div>
-        ${node.cpuCapacity ? `<div>CPU: ${node.cpuCapacity}m &middot; Mem: ${formatBytes(node.memoryCapacity)}</div>` : ''}
-      `;
-      tooltip.style.display = 'block';
-    } else if (hoveredMesh.userData.type === 'pod') {
-      const pod = hoveredMesh.userData.pod;
-      const statusClass = pod.status === 'Running' ? 'status-running'
-        : ['Pending', 'ContainerCreating', 'PodInitializing'].includes(pod.status) ? 'status-pending'
-        : 'status-error';
-      tooltip.innerHTML = `
-        <div class="pod-name">${pod.name}</div>
-        <div class="pod-ns">ns/${pod.namespace}${pod.nodeName ? ' · node/' + pod.nodeName : ''}</div>
-        <div class="pod-status ${statusClass}">● ${pod.status}</div>
-        <div>Ready: ${pod.ready ? 'YES' : 'NO'} &middot; Restarts: ${pod.restarts}</div>
-        ${pod.cpuRequest || pod.memoryRequest ? `<div>CPU: ${pod.cpuRequest ? pod.cpuRequest + 'm' : '—'} &middot; Mem: ${pod.memoryRequest ? formatBytes(pod.memoryRequest) : '—'}</div>` : ''}
-        <div>Age: ${pod.age}</div>
-      `;
+    const html = buildTooltipHTML(hoveredMesh);
+    if (html) {
+      tooltip.innerHTML = html;
       tooltip.style.display = 'block';
     } else {
       tooltip.style.display = 'none';
@@ -2136,6 +2245,75 @@ function updateRaycast() {
     tooltip.style.display = 'none';
   }
 }
+
+// ── Ingress arch click → route list panel ──────────────────────
+const ingressPanel = document.getElementById('ingress-panel');
+
+function closeIngressPanel() {
+  ingressPanel.style.display = 'none';
+  ingressPanel.innerHTML = '';
+}
+
+canvas.addEventListener('click', (e) => {
+  // Close if already open
+  if (ingressPanel.style.display === 'block') {
+    closeIngressPanel();
+  }
+
+  const mouse = new THREE.Vector2(
+    (e.clientX / window.innerWidth) * 2 - 1,
+    -(e.clientY / window.innerHeight) * 2 + 1,
+  );
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(mouse, activeCamera());
+
+  const archMeshes = [];
+  scene.traverse((obj) => {
+    if (obj.isMesh && obj.userData.type === 'ingressArch') archMeshes.push(obj);
+  });
+  const hits = ray.intersectObjects(archMeshes);
+  if (hits.length === 0) return;
+
+  const data = hits[0].object.userData;
+  if (!data.namespace) return;
+
+  const nsIngresses = data.ingresses || state.ingresses.filter(i => i.namespace === data.namespace);
+
+  let html = `<div class="ing-header">Routes — ns/${data.namespace} (${nsIngresses.length} ingresses)</div>`;
+  for (const ni of nsIngresses) {
+    for (const rule of ni.rules || []) {
+      const host = rule.host || '—';
+      const path = rule.path && rule.path !== '/' ? rule.path : '/';
+      const url = rule.host ? 'https://' + rule.host + (rule.path || '') : '';
+      html += `<div class="ing-route" ${url ? `data-url="${url}"` : ''}>`;
+      html += `<div>${ni.name}</div>`;
+      html += `<div>${host}${path}</div>`;
+      if (rule.serviceName) html += `<div class="ing-svc">→ svc/${rule.serviceName}${rule.servicePort ? ':' + rule.servicePort : ''}</div>`;
+      html += `</div>`;
+    }
+  }
+
+  ingressPanel.innerHTML = html;
+  ingressPanel.style.left = Math.min(e.clientX, window.innerWidth - 320) + 'px';
+  ingressPanel.style.top = e.clientY + 'px';
+  ingressPanel.style.display = 'block';
+
+  // Click on a route to open its URL
+  ingressPanel.querySelectorAll('.ing-route[data-url]').forEach(el => {
+    el.addEventListener('click', () => {
+      window.open(el.dataset.url, '_blank');
+    });
+  });
+
+  e.stopPropagation();
+});
+
+// Close ingress panel on Escape or click outside
+document.addEventListener('click', (e) => {
+  if (ingressPanel.style.display === 'block' && !ingressPanel.contains(e.target)) {
+    closeIngressPanel();
+  }
+});
 
 // ── Pod animation ──────────────────────────────────────────────
 function animatePods(time) {
