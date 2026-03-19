@@ -967,6 +967,56 @@ function updateHUD() {
   document.getElementById('svc-count').textContent = state.services.length;
 }
 
+// ── Context Switcher ───────────────────────────────────────────
+async function loadContexts() {
+  try {
+    const res = await fetch('/api/contexts');
+    const data = await res.json();
+    const sel = document.getElementById('ctx-select');
+    sel.innerHTML = '';
+    for (const ctx of (data.contexts || []).sort()) {
+      const opt = document.createElement('option');
+      opt.value = ctx;
+      opt.textContent = ctx;
+      sel.appendChild(opt);
+    }
+    sel.value = data.active || data.current;
+  } catch (e) {
+    console.error('Failed to load contexts:', e);
+  }
+}
+
+document.getElementById('ctx-select').addEventListener('change', async (e) => {
+  const newCtx = e.target.value;
+  const sel = e.target;
+  const switching = document.getElementById('ctx-switching');
+  sel.disabled = true;
+  switching.style.display = 'inline';
+
+  try {
+    const res = await fetch('/api/context/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ context: newCtx }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error('Context switch failed:', err);
+      // Revert selection
+      await loadContexts();
+    }
+    // The server will push a new snapshot via WebSocket automatically
+  } catch (e) {
+    console.error('Context switch error:', e);
+    await loadContexts();
+  } finally {
+    sel.disabled = false;
+    switching.style.display = 'none';
+  }
+});
+
+loadContexts();
+
 // ── WebSocket ──────────────────────────────────────────────────
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -991,6 +1041,12 @@ function connectWS() {
 function handleEvent(event) {
   switch (event.type) {
     case 'snapshot':
+      // Update active context in dropdown
+      if (event.context) {
+        const sel = document.getElementById('ctx-select');
+        if (sel.value !== event.context) sel.value = event.context;
+        document.getElementById('ctx-switching').style.display = 'none';
+      }
       // Clear existing
       for (const [name] of state.namespaces) removeNamespace(name);
       for (const ns of event.snapshot) {

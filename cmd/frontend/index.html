@@ -31,8 +31,40 @@
     font-size: 18px;
     margin-bottom: 4px;
     letter-spacing: 2px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
   #hud .stats { opacity: 0.7; font-size: 12px; }
+
+  #ctx-select {
+    pointer-events: auto;
+    background: rgba(0, 20, 10, 0.9);
+    color: #ffaa00;
+    border: 1px solid rgba(255, 170, 0, 0.5);
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    padding: 2px 6px;
+    cursor: pointer;
+    text-shadow: 0 0 6px #ffaa00;
+    outline: none;
+    max-width: 220px;
+  }
+  #ctx-select:hover {
+    border-color: #ffaa00;
+    background: rgba(255, 170, 0, 0.1);
+  }
+  #ctx-select option {
+    background: #001a0d;
+    color: #ffaa00;
+  }
+  #ctx-switching {
+    display: none;
+    color: #ffaa00;
+    font-size: 0.6em;
+    opacity: 0.8;
+    animation: pulse 1s ease-in-out infinite;
+  }
 
   #tooltip {
     position: fixed;
@@ -129,7 +161,7 @@
 <body>
 <div id="scanlines"></div>
 <div id="hud">
-  <h1>K8S UNIX SYSTEM</h1>
+  <h1>K8S UNIX SYSTEM <select id="ctx-select" title="Switch Kubernetes context"></select><span id="ctx-switching">SWITCHING...</span></h1>
   <div class="stats">
     <span id="node-count">0</span> NODES &middot;
     <span id="ns-count">0</span> NAMESPACES &middot;
