@@ -62,6 +62,7 @@ func (s *Server) Router(frontendFS http.FileSystem) http.Handler {
 	r.Patch("/api/cronjob/schedule", s.handleCronJobSchedule)
 	r.Patch("/api/cronjob/suspend", s.handleCronJobSuspend)
 	r.Post("/api/cronjob/trigger", s.handleCronJobTrigger)
+	r.Get("/api/resource/describe", s.handleResourceDescribe)
 	r.Get("/api/service/describe", s.handleServiceDescribe)
 	r.Get("/api/service/endpoints", s.handleServiceEndpoints)
 	r.Post("/api/service/portforward", s.handleServicePortForward)
