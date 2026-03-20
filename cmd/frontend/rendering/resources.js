@@ -38,6 +38,7 @@ function resourceLayerKey(kind) {
 }
 
 const RESOURCE_MARKER_SIZE = 0.2;
+const DEPENDENT_MARKER_SIZE = 0.4;
 const RESOURCE_Y = -0.1;
 const RESOURCE_SPACING = RESOURCE_MARKER_SIZE * 2.5;
 const RESOURCE_EDGE_GAP = 1.2;
@@ -53,6 +54,30 @@ function rebuildResources() {
 
   const group = new THREE.Group();
   group.userData = { type: 'resourceGroup' };
+
+  // Build dependency map: "ConfigMap/name" or "Secret/name" → Set of pod mesh refs
+  const dependencyMap = new Map();
+  for (const [nsName, ns] of state.namespaces) {
+    if (!ns.pods) continue;
+    for (const [, podMesh] of ns.pods) {
+      const pod = podMesh.userData.pod;
+      if (!pod) continue;
+      if (pod.configMapNames) {
+        for (const cmName of pod.configMapNames) {
+          const key = nsName + '/ConfigMap/' + cmName;
+          if (!dependencyMap.has(key)) dependencyMap.set(key, new Set());
+          dependencyMap.get(key).add(podMesh);
+        }
+      }
+      if (pod.secretNames) {
+        for (const secName of pod.secretNames) {
+          const key = nsName + '/Secret/' + secName;
+          if (!dependencyMap.has(key)) dependencyMap.set(key, new Set());
+          dependencyMap.get(key).add(podMesh);
+        }
+      }
+    }
+  }
 
   // Group resources by namespace, then by layer
   const byNs = new Map();
@@ -111,11 +136,16 @@ function rebuildResources() {
       const wrapCols = Math.ceil(resources.length / maxAlong);
       const stripBase = stripIdx * (wrapCols * RESOURCE_SPACING + RESOURCE_SPACING);
 
+      let edgeIdx = 0;
       for (let i = 0; i < resources.length; i++) {
         const res = resources[i];
         const color = RESOURCE_COLORS[res.kind] || 0x777777;
+        const depKey = nsName + '/' + res.kind + '/' + res.name;
+        const consumers = dependencyMap.get(depKey);
+        const isDependent = (res.kind === 'ConfigMap' || res.kind === 'Secret') && consumers && consumers.size > 0;
+        const markerSize = isDependent ? DEPENDENT_MARKER_SIZE : RESOURCE_MARKER_SIZE;
 
-        const geo = new THREE.BoxGeometry(RESOURCE_MARKER_SIZE, RESOURCE_MARKER_SIZE * 0.6, RESOURCE_MARKER_SIZE);
+        const geo = new THREE.BoxGeometry(markerSize, markerSize * 0.6, markerSize);
         const mat = new THREE.MeshPhongMaterial({
           color,
           emissive: new THREE.Color(color).multiplyScalar(0.4),
@@ -124,22 +154,55 @@ function rebuildResources() {
         });
         const mesh = new THREE.Mesh(geo, mat);
 
-        const along = i % maxAlong;
-        const perp = Math.floor(i / maxAlong);
-
         let mx, mz;
-        if (side === 'left') {
-          mx = cx - halfW - RESOURCE_EDGE_GAP - stripBase - perp * RESOURCE_SPACING;
-          mz = cz - halfD + along * RESOURCE_SPACING + RESOURCE_SPACING / 2;
-        } else if (side === 'right') {
-          mx = cx + halfW + RESOURCE_EDGE_GAP + stripBase + perp * RESOURCE_SPACING;
-          mz = cz - halfD + along * RESOURCE_SPACING + RESOURCE_SPACING / 2;
+        if (isDependent) {
+          // Position near centroid of consuming pods
+          let sumX = 0, sumZ = 0, count = 0;
+          for (const podMesh of consumers) {
+            const wp = new THREE.Vector3();
+            podMesh.getWorldPosition(wp);
+            sumX += wp.x;
+            sumZ += wp.z;
+            count++;
+          }
+          mx = sumX / count;
+          mz = sumZ / count + 0.8;
+          mesh.position.set(mx, 1.5, mz);
+
+          // Draw connection lines to each consuming pod
+          for (const podMesh of consumers) {
+            const wp = new THREE.Vector3();
+            podMesh.getWorldPosition(wp);
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([
+              mesh.position.clone(),
+              wp,
+            ]);
+            const lineMat = new THREE.LineBasicMaterial({
+              color,
+              transparent: true,
+              opacity: 0.2,
+            });
+            const line = new THREE.Line(lineGeo, lineMat);
+            subGroup.add(line);
+          }
         } else {
-          mx = cx - halfW + along * RESOURCE_SPACING + RESOURCE_SPACING / 2;
-          mz = cz + halfD + RESOURCE_EDGE_GAP + stripBase + perp * RESOURCE_SPACING;
+          const along = edgeIdx % maxAlong;
+          const perp = Math.floor(edgeIdx / maxAlong);
+
+          if (side === 'left') {
+            mx = cx - halfW - RESOURCE_EDGE_GAP - stripBase - perp * RESOURCE_SPACING;
+            mz = cz - halfD + along * RESOURCE_SPACING + RESOURCE_SPACING / 2;
+          } else if (side === 'right') {
+            mx = cx + halfW + RESOURCE_EDGE_GAP + stripBase + perp * RESOURCE_SPACING;
+            mz = cz - halfD + along * RESOURCE_SPACING + RESOURCE_SPACING / 2;
+          } else {
+            mx = cx - halfW + along * RESOURCE_SPACING + RESOURCE_SPACING / 2;
+            mz = cz + halfD + RESOURCE_EDGE_GAP + stripBase + perp * RESOURCE_SPACING;
+          }
+          mesh.position.set(mx, RESOURCE_Y + RESOURCE_MARKER_SIZE / 2, mz);
+          edgeIdx++;
         }
 
-        mesh.position.set(mx, RESOURCE_Y + RESOURCE_MARKER_SIZE / 2, mz);
         mesh.userData = { type: 'resource', resource: res };
         subGroup.add(mesh);
       }

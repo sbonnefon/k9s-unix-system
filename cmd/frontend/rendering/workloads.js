@@ -125,7 +125,15 @@ function rebuildWorkloadGroups() {
         minZ = Math.min(minZ, wp.z);
         maxZ = Math.max(maxZ, wp.z);
       }
-      const pad = 0.5;
+      let hasResources = false;
+      for (const mesh of matchedMeshes) {
+        const pod = mesh.userData.pod;
+        if (pod && (pod.configMapNames?.length > 0 || pod.secretNames?.length > 0)) {
+          hasResources = true;
+          break;
+        }
+      }
+      const pad = hasResources ? 0.8 : 0.5;
       w = Math.max(maxX - minX + pad * 2, 1.5);
       d = Math.max(maxZ - minZ + pad * 2, 1.5);
       cx = (minX + maxX) / 2;
