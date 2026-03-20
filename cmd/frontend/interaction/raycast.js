@@ -128,10 +128,31 @@ function buildTooltipHTML(mesh) {
       const res = ud.resource;
       const color = '#' + new THREE.Color(_RESOURCE_COLORS[res.kind] || 0x777777).getHexString();
       const dataEntries = res.data ? Object.entries(res.data).map(([k, v]) => `<div style="opacity:0.7">${k}: ${v}</div>`).join('') : '';
+      let referencedBy = '';
+      if (res.kind === 'ConfigMap' || res.kind === 'Secret') {
+        const refPods = [];
+        const ns = state.namespaces.get(res.namespace);
+        if (ns && ns.pods) {
+          for (const [, podMesh] of ns.pods) {
+            const pod = podMesh.userData.pod;
+            if (!pod) continue;
+            const names = res.kind === 'ConfigMap' ? pod.configMapNames : pod.secretNames;
+            if (names && names.includes(res.name)) {
+              refPods.push('pod/' + pod.name);
+            }
+          }
+        }
+        if (refPods.length) {
+          referencedBy = `<div style="opacity:0.8;color:${color}">Referenced by: ${refPods.join(', ')}</div>`;
+        }
+      }
+      const dblClickHint = res.kind === 'ConfigMap' ? `<div style="opacity:0.5; margin-top:4px">Double-click for actions</div>` : '';
       return `
         <div class="pod-name" style="color:${color}">${res.kind}</div>
         <div class="pod-ns">${res.name}${res.namespace ? ' · ns/' + res.namespace : ' (cluster)'}</div>
         ${dataEntries}
+        ${referencedBy}
+        ${dblClickHint}
       `;
     }
     case 'workload': {
