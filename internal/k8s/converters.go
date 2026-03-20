@@ -63,12 +63,51 @@ func podToInfo(pod *corev1.Pod) PodInfo {
 		}
 	}
 
-	// Collect PVC references
+	// Collect volume references (PVC, ConfigMap, Secret)
 	var pvcNames []string
+	cmSet := make(map[string]bool)
+	secretSet := make(map[string]bool)
 	for _, v := range pod.Spec.Volumes {
 		if v.PersistentVolumeClaim != nil {
 			pvcNames = append(pvcNames, v.PersistentVolumeClaim.ClaimName)
 		}
+		if v.ConfigMap != nil {
+			cmSet[v.ConfigMap.Name] = true
+		}
+		if v.Secret != nil {
+			secretSet[v.Secret.SecretName] = true
+		}
+		if v.Projected != nil {
+			for _, src := range v.Projected.Sources {
+				if src.ConfigMap != nil {
+					cmSet[src.ConfigMap.Name] = true
+				}
+				if src.Secret != nil {
+					secretSet[src.Secret.Name] = true
+				}
+			}
+		}
+	}
+
+	// Collect envFrom references (ConfigMap, Secret)
+	for _, c := range pod.Spec.Containers {
+		for _, ef := range c.EnvFrom {
+			if ef.ConfigMapRef != nil {
+				cmSet[ef.ConfigMapRef.Name] = true
+			}
+			if ef.SecretRef != nil {
+				secretSet[ef.SecretRef.Name] = true
+			}
+		}
+	}
+
+	var configMapNames []string
+	for name := range cmSet {
+		configMapNames = append(configMapNames, name)
+	}
+	var secretNames []string
+	for name := range secretSet {
+		secretNames = append(secretNames, name)
 	}
 
 	// Resolve owner — walk through ReplicaSet to find Deployment
@@ -103,6 +142,8 @@ func podToInfo(pod *corev1.Pod) PodInfo {
 		OwnerName:      ownerName,
 		ContainerCount: len(pod.Spec.Containers),
 		PVCNames:       pvcNames,
+		ConfigMapNames: configMapNames,
+		SecretNames:    secretNames,
 	}
 }
 

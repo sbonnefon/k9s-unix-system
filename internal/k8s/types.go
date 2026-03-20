@@ -21,6 +21,8 @@ type PodInfo struct {
 	OwnerName      string            `json:"ownerName,omitempty"`
 	ContainerCount int               `json:"containerCount"`
 	PVCNames       []string          `json:"pvcNames,omitempty"`
+	ConfigMapNames []string          `json:"configMapNames,omitempty"`
+	SecretNames    []string          `json:"secretNames,omitempty"`
 }
 
 type NamespaceInfo struct {
