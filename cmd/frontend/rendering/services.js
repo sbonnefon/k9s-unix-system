@@ -57,22 +57,7 @@ function rebuildServiceLines() {
     center.divideScalar(matchedMeshes.length);
     center.y += 2.5;
 
-    // Service hub -- a small glowing sphere at the anchor point
-    const hubGeo = new THREE.SphereGeometry(0.18, 12, 12);
-    const hubMat = new THREE.MeshPhongMaterial({
-      color: 0x00aaff, emissive: 0x00aaff, emissiveIntensity: 0.8,
-      transparent: true, opacity: 0.9,
-    });
-    const hub = new THREE.Mesh(hubGeo, hubMat);
-    hub.position.copy(center);
-    hub.userData = {
-      type: 'service',
-      service: svc,
-      matchedPodCount: matchedMeshes.length,
-    };
-    group.add(hub);
-
-    // Draw tubes from hub to each matched pod
+    // Draw tubes from center to each matched pod
     const tubeMat = new THREE.MeshPhongMaterial({
       color: 0x00aaff,
       emissive: 0x004466,

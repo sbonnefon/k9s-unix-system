@@ -62,9 +62,9 @@ function applyHoverHighlight(mesh) {
   if (mat.emissive) {
     mat.emissiveIntensity = Math.max(mat.emissiveIntensity * 3, 2);
   }
-  // Boost opacity for transparent objects (workloads, ingress arches, etc.)
+  // Boost opacity for transparent objects (workloads, ingress arches, service tubes, etc.)
   if (mat.transparent && mat.opacity < 0.5) {
-    mat.opacity = Math.min(mat.opacity * 3, 0.6);
+    mat.opacity = Math.min(mat.opacity * 3, 0.85);
   }
 }
 
