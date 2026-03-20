@@ -6,7 +6,11 @@ A 3D Kubernetes resource viewer inspired by the FSN (File System Navigator) from
 
 ## Demo
 
-![Demo](assets/demo.gif)
+Current demo video:
+
+https://github.com/user-attachments/assets/6817074a-63dc-4ffc-b991-aa2436c1c5b1
+
+If you cannot view the video, here are a couple of screenshots:
 
 <p align="center">
   <img src="assets/screen1.png" alt="Screenshot 1" width="49%" />
@@ -15,15 +19,20 @@ A 3D Kubernetes resource viewer inspired by the FSN (File System Navigator) from
 
 Namespaces are rendered as raised platforms (islands), pods as 3D blocks on each island. Live updates via Kubernetes watch API.
 
-## Install
+**See [FEATURES.md](FEATURES.md) for the full feature list.**
 
-### Homebrew
+## Highlights
 
-```bash
-brew install jlandersen/tap/kube3d
-```
+- **Live 3D cluster view** — Namespaces as islands, pods as colored blocks, nodes on a dedicated island
+- **Rich resource visualization** — Services (arcs), Ingresses (golden arcs), PVCs (disks), Workload groups (outlines)
+- **Interactive pod actions** — Double-click to describe, stream logs, or kill pods
+- **Workload management** — Scale, edit resources, restart deployments, manage CronJobs
+- **Layer toggles** — Show/hide each resource type (services, ingresses, PVCs, workloads, RBAC, secrets...)
+- **Context switcher** — Switch Kubernetes contexts on the fly from the HUD
+- **Eagle eye view** — Orthographic top-down overview of the entire cluster
+- **Fly-to navigation** — Click a namespace to zoom in and inspect individual pods
 
-### Docker
+## Quick Start (Docker)
 
 ```bash
 docker run --rm -it \
@@ -38,35 +47,31 @@ docker run --rm -it \
   ghcr.io/jlandersen/k8s-unix-system:main --context my-cluster
 ```
 
-### Go
+Then open http://localhost:8080.
+
+## Install
 
 ```bash
-go install github.com/jeppe/k8s-unix-system/cmd/kube3d@latest
+go install github.com/jeppe/k8s-unix-system/cmd@latest
 ```
 
-### Build from source
+Or build from source:
 
 ```bash
-go build -o kube3d ./cmd/kube3d
+go build -o k8s-unix-system ./cmd/
 ```
 
 ## Usage
 
 ```bash
 # Use current kubeconfig context
-kube3d
+./k8s-unix-system
 
 # Specify a context
-kube3d --context my-cluster
-
-# Use a specific kubeconfig file
-kube3d --kubeconfig /path/to/kubeconfig
-
-# Watch a single namespace (works with restricted RBAC)
-kube3d -n my-namespace
+./k8s-unix-system --context my-cluster
 
 # Custom port, don't open browser
-kube3d --port 9090 --no-browser
+./k8s-unix-system --port 9090 --no-browser
 ```
 
 Opens a browser with the 3D view. All data streams live from your cluster.
@@ -81,23 +86,14 @@ Opens a browser with the 3D view. All data streams live from your cluster.
 | **Space** | Fly up |
 | **Ctrl** | Fly down |
 | **Shift** | Move faster |
-| **Hover pod / node** | Show details tooltip |
-| **Esc** | Release cursor |
-
-## Supported Resources
-
-| Resource | How it's shown |
-|---|---|
-| **Pods** | 3D blocks on namespace platforms, colored by status, sized by CPU/memory requests |
-| **Namespaces** | Raised platform islands that group all resources in the namespace |
-| **Nodes** | Cubes on a dedicated dark-blue island, colored by Ready/NotReady status |
-| **Workloads** | Pods grouped under their owning Deployment, StatefulSet, DaemonSet, Job, or CronJob |
-| **Services** | Cyan arcs connecting pods that match the service's label selector |
-| **Ingresses** | Orange diamond markers on the platform with orthogonal connector lines to target service pods |
-| **PersistentVolumeClaims** | Purple cylinder markers on the platform with orthogonal connector lines to pods that mount them |
-| **PersistentVolumes** | Accessible via the detail panel and search; no scene marker (cluster-scoped) |
-
-All resources stream live from the cluster via the Kubernetes watch API.
+| **E** | Toggle eagle eye (top-down) view |
+| **L** | Toggle layer panel |
+| **Double-click pod** | Open action menu (describe, logs, kill) |
+| **Double-click service** | Open action menu (describe, endpoints, port-forward) |
+| **Double-click workload** | Open edit panel (scale, resources, restart) |
+| **Click ingress arc** | Show route details |
+| **Hover any resource** | Show details tooltip |
+| **Esc** | Release cursor / close panel |
 
 ## Visual Guide
 
@@ -105,34 +101,38 @@ All resources stream live from the cluster via the Kubernetes watch API.
 - **Green blocks** — Running pods
 - **Yellow blocks** — Pending / Initializing
 - **Red blocks** — Error / CrashLoopBackOff
+- **Orange blocks** — ImagePullBackOff / Terminating
 - **Block height** — Increases with restart count
-- Pods gently bob when running; error pods shake
+- **Block shape** — Varies by owner kind (Deployment, StatefulSet, etc.)
+- Running pods gently bob; error pods shake aggressively
 
 ### Nodes
 Nodes are rendered on a separate dark-blue island labeled **NODES**. Each node is a cube colored by status:
 - **Cyan blocks** — Ready
 - **Red blocks** — NotReady
 
-Hover a node to see its name, status, CPU capacity, and memory capacity.
-
 ### Services
-Services are visualized as curved cyan arcs connecting pods that match a service's label selector. When a service selects two or more pods, arcs radiate from the first matched pod to the others, forming a star topology. Lines are semi-transparent so they don't obscure the rest of the scene.
+Glowing cyan tubes connecting a service hub to matched pods. Double-click for describe, endpoints, or port-forward.
 
 ### Ingresses
-Ingresses appear as orange diamond markers on the front edge of namespace platforms. Orthogonal connector lines trace the path from each ingress to the pods backing its target services. Hover a marker to see the routing rules (host, path, backend service).
+Golden arcs above namespace islands connecting to backend service pods. Click to see routing rules.
 
-### PersistentVolumeClaims
-PVCs appear as purple cylinder markers on namespace platforms. Orthogonal connector lines connect each PVC to the pods that mount it. Click a marker to fly to it and open the detail panel, which shows the claim status, storage class, bound PV, and mounting pods. Pods with volume mounts also list their PVCs in the pod detail panel. PersistentVolumes have no scene marker but are reachable via the detail panel (linked from a bound PVC) or search (`kind:pv`).
+### PVCs
+Flat cylinder disks on the workload layer. Green = Bound, Yellow = Pending, Red = Lost.
+
+### Workload Groups
+Translucent outline boxes grouping pods by their owning Deployment, StatefulSet, DaemonSet, Job, or CronJob. Label shows replica count.
 
 ### Namespaces
-- **Platform color** — Namespace island (pink/magenta)
+- **Pink/magenta platforms** — Accessible namespaces
+- **Dark/dimmed platforms** — Forbidden namespaces (RBAC denied)
 
 ## Flags
 
 | Flag | Default | Description |
 |---|---|---|
 | `--context` | current | Kubernetes context |
-| `--kubeconfig` | `~/.kube/config` | Path to kubeconfig file (also respects `KUBECONFIG` env var) |
-| `--namespace`, `-n` | all | Scope all watches to a single namespace (useful with restricted RBAC) |
+| `--namespace` | all | Restrict to a specific namespace |
+| `--kubeconfig` | default | Path to kubeconfig file |
 | `--port` | 8080 | HTTP server port |
 | `--no-browser` | false | Don't auto-open browser |

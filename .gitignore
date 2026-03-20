@@ -25,18 +25,13 @@ go.work
 go.work.sum
 
 # Binary
-/kube3d
+k8s-unix-system
 
 # env file
 .env
-
-# Generated kubeconfigs
-*.kubeconfig
 
 # Editor/IDE
 # .idea/
 # .vscode/
 
 TODO.md
-.cache
-RELEASE_NOTES.md

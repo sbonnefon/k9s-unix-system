@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>K8s Unix System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/base.css">
+<link rel="stylesheet" href="styles/legend.css">
+<link rel="stylesheet" href="styles/panels.css">
+</head>
+<body>
+<div id="scanlines"></div>
+<div id="hud">
+  <h1>K8S UNIX SYSTEM <select id="ctx-select" title="Switch Kubernetes context"></select><span id="ctx-switching">SWITCHING...</span></h1>
+  <div class="stats">
+    <span id="node-count">0</span> NODES &middot;
+    <span id="ns-count">0</span> NAMESPACES &middot;
+    <span id="pod-count">0</span> PODS &middot;
+    <span id="svc-count">0</span> SVC &middot;
+    <span id="ing-count">0</span> ING &middot;
+    <span id="pvc-count">0</span> PVC &middot;
+    <span id="wl-count">0</span> WORKLOADS &middot;
+    <span id="res-count">0</span> RESOURCES
+  </div>
+</div>
+<div id="tooltip"></div>
+<div id="legend">
+  <h2>POD STATUS</h2>
+  <div class="legend-item"><div class="legend-dot" style="background:#00ff88;color:#00ff88"></div>Running</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#00aaff;color:#00aaff"></div>Succeeded</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ffcc00;color:#ffcc00"></div>Pending / Initializing</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ff4444;color:#ff4444"></div>Failed / Error</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ff2222;color:#ff2222"></div>CrashLoopBackOff</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ff6600;color:#ff6600"></div>ImagePullBackOff</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ff8800;color:#ff8800"></div>Terminating</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#888888;color:#888888"></div>Unknown</div>
+  <h2 style="margin-top:8px">WORKLOAD TYPE</h2>
+  <div class="legend-item"><div class="legend-dot" style="background:#00ff88;color:#00ff88"></div>Deployment</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#00aaff;color:#00aaff"></div>StatefulSet</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#44ccaa;color:#44ccaa"></div>DaemonSet</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ffaa00;color:#ffaa00"></div>CronJob</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ffcc66;color:#ffcc66"></div>Job</div>
+  <h2 style="margin-top:8px">RESOURCES</h2>
+  <div class="legend-item"><div class="legend-dot" style="background:#66bbcc;color:#66bbcc"></div>ConfigMap</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#cc6666;color:#cc6666"></div>Secret</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#88cc44;color:#88cc44"></div>ServiceAccount</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#dd8844;color:#dd8844"></div>HPA</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#cc44aa;color:#cc44aa"></div>NetworkPolicy</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#aa88dd;color:#aa88dd"></div>PDB</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#448899;color:#448899"></div>ReplicaSet</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#998844;color:#998844"></div>RBAC</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#777777;color:#777777"></div>Other</div>
+  <h2 style="margin-top:8px">NAMESPACES</h2>
+  <div class="legend-item"><div class="legend-dot" style="background:#882244;color:#882244"></div>Accessible</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#111111;color:#ff4444;border:1px solid #ff4444"></div>Forbidden</div>
+</div>
+<div id="layer-panel">
+  <h2>LAYERS</h2>
+  <label class="layer-toggle"><input type="checkbox" data-layer="services" checked><span class="layer-dot" style="background:#00aaff"></span>Service Lines</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="ingresses" checked><span class="layer-dot" style="background:#ffaa00"></span>Ingresses</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="pvcs" checked><span class="layer-dot" style="background:#8844cc"></span>PVCs</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="workloads" checked><span class="layer-dot" style="background:#00ff88"></span>Workload Groups</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="forbidden" checked><span class="layer-dot" style="background:#ff4444"></span>Forbidden NS</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="nodes" checked><span class="layer-dot" style="background:#4488aa"></span>Node Island</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="configmaps"><span class="layer-dot" style="background:#66bbcc"></span>ConfigMaps</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="secrets"><span class="layer-dot" style="background:#cc6666"></span>Secrets</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="serviceaccounts"><span class="layer-dot" style="background:#88cc44"></span>ServiceAccounts</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="hpa"><span class="layer-dot" style="background:#dd8844"></span>HPAs</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="networkpolicies"><span class="layer-dot" style="background:#cc44aa"></span>NetworkPolicies</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="pdb"><span class="layer-dot" style="background:#aa88dd"></span>PDBs</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="replicasets"><span class="layer-dot" style="background:#448899"></span>ReplicaSets</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="rbac"><span class="layer-dot" style="background:#998844"></span>RBAC</label>
+  <label class="layer-toggle"><input type="checkbox" data-layer="other-resources"><span class="layer-dot" style="background:#777777"></span>Other</label>
+</div>
+<div id="minimap" style="display:none"><canvas id="minimap-canvas" width="200" height="200"></canvas></div>
+<div id="controls-hint">WASD/Arrows: Move &middot; Mouse: Look &middot; Shift: Fast &middot; Space/Ctrl: Up/Down &middot; Click: Lock cursor &middot; Esc: Unlock &middot; E: Eagle Eye &middot; M: Minimap &middot; DblClick: Pod/Workload Actions</div>
+<div id="loading">CONNECTING TO CLUSTER...</div>
+
+<div id="pod-menu">
+  <div class="menu-header" id="pod-menu-title"></div>
+  <div class="menu-item" id="pod-menu-describe"><span class="menu-key">D</span> Describe</div>
+  <div class="menu-item" id="pod-menu-logs"><span class="menu-key">L</span> Logs --follow</div>
+  <div class="menu-item" id="pod-menu-open-url" style="display:none;color:#ffaa00"><span class="menu-key" style="border-color:#ffaa00;color:#ffaa00">O</span> Open URL</div>
+  <div class="menu-item danger" id="pod-menu-kill"><span class="menu-key">K</span> Kill Pod</div>
+</div>
+
+<div id="svc-menu">
+  <div class="menu-header" id="svc-menu-title"></div>
+  <div class="menu-item" id="svc-menu-describe"><span class="menu-key">D</span> Describe</div>
+  <div class="menu-item" id="svc-menu-endpoints"><span class="menu-key">E</span> Endpoints</div>
+  <div id="svc-menu-pf-ports"></div>
+</div>
+
+<div id="resource-menu">
+  <div class="menu-header" id="resource-menu-title"></div>
+  <div class="menu-item" id="resource-menu-view"><span class="menu-key">V</span> View YAML</div>
+  <div class="menu-item" id="resource-menu-edit"><span class="menu-key">E</span> Edit</div>
+</div>
+
+<div id="resource-edit-panel">
+  <div class="wl-header">
+    <span id="resource-edit-title"></span>
+    <button class="wl-close" id="resource-edit-close">ESC</button>
+  </div>
+  <div id="resource-edit-body" style="padding:12px 16px;max-height:60vh;overflow-y:auto"></div>
+  <div id="resource-edit-status"></div>
+  <div class="wl-actions">
+    <button class="wl-action-btn primary" id="resource-save-btn">SAVE</button>
+  </div>
+</div>
+
+<div id="ingress-panel"></div>
+
+<div id="output-panel">
+  <div id="output-header">
+    <span id="output-title"></span>
+    <span id="output-close">ESC</span>
+  </div>
+  <div id="output-body"></div>
+</div>
+
+<div id="kill-confirm">
+  <div class="kill-title">CONFIRM POD DELETION</div>
+  <div class="kill-pod" id="kill-pod-name"></div>
+  <div class="kill-actions">
+    <button class="kill-btn yes" id="kill-yes">Y - DELETE</button>
+    <button class="kill-btn no" id="kill-no">N - CANCEL</button>
+  </div>
+</div>
+
+<div id="wl-edit-panel">
+  <div class="wl-header">
+    <span id="wl-edit-title"></span>
+    <button class="wl-close" id="wl-edit-close">ESC</button>
+  </div>
+  <div class="wl-section">
+    <div class="wl-section-title">REPLICAS</div>
+    <div class="wl-replicas">
+      <button class="wl-replica-btn" id="wl-replica-minus">-</button>
+      <span class="wl-replica-val" id="wl-replica-val">0</span>
+      <button class="wl-replica-btn" id="wl-replica-plus">+</button>
+      <span class="wl-replica-label"><span id="wl-ready-val">0</span> ready</span>
+    </div>
+  </div>
+  <div class="wl-section" id="wl-containers-section">
+    <div class="wl-section-title">CONTAINER RESOURCES</div>
+    <div id="wl-containers"></div>
+  </div>
+  <div id="wl-edit-status"></div>
+  <div class="wl-actions">
+    <button class="wl-action-btn primary" id="wl-apply-btn">APPLY</button>
+    <button class="wl-action-btn warn" id="wl-restart-btn">RESTART</button>
+    <button class="wl-action-btn danger" id="wl-scale-zero-btn">SCALE TO 0</button>
+  </div>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

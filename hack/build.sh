@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${ROOT}/kube3d"
+OUT="${ROOT}/k8s-unix-system"
 
 cd "$ROOT"
-echo "Building kube3d..."
-go build -o "$OUT" ./cmd/kube3d
+echo "Building k8s-unix-system..."
+go build -o "$OUT" ./cmd
 echo "Built: $OUT"

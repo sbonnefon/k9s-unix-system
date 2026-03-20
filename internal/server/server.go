@@ -1,11 +1,11 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
-	"net/url"
-	"strings"
+	"os/exec"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
@@ -15,34 +15,34 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: sameOrigin,
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type portForwardEntry struct {
+	cmd       *exec.Cmd
+	cancel    context.CancelFunc
+	LocalPort int    `json:"localPort"`
+	SvcName   string `json:"service"`
+	Namespace string `json:"namespace"`
+	SvcPort   int    `json:"servicePort"`
 }
 
 type Server struct {
-	watcher *k8swatch.Watcher
-	clients map[*websocket.Conn]struct{}
-	mu      sync.Mutex
+	watcher      *k8swatch.Watcher
+	clients      map[*websocket.Conn]bool
+	mu           sync.Mutex
+	ctx          context.Context
+	portForwards map[string]*portForwardEntry // key: "ns/name:port"
+	pfMu         sync.Mutex
 }
 
-func New(w *k8swatch.Watcher) *Server {
+func New(w *k8swatch.Watcher, ctx context.Context) *Server {
 	return &Server{
-		watcher: w,
-		clients: make(map[*websocket.Conn]struct{}),
+		watcher:      w,
+		clients:      make(map[*websocket.Conn]bool),
+		ctx:          ctx,
+		portForwards: make(map[string]*portForwardEntry),
 	}
-}
-
-func sameOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-
-	originURL, err := url.Parse(origin)
-	if err != nil {
-		return false
-	}
-
-	return strings.EqualFold(originURL.Host, r.Host)
 }
 
 func (s *Server) Router(frontendFS http.FileSystem) http.Handler {
@@ -50,6 +50,24 @@ func (s *Server) Router(frontendFS http.FileSystem) http.Handler {
 	r.Use(middleware.Recoverer)
 
 	r.Get("/api/state", s.handleState)
+	r.Get("/api/contexts", s.handleListContexts)
+	r.Post("/api/context/switch", s.handleSwitchContext)
+	r.Get("/api/pod/describe", s.handleDescribe)
+	r.Get("/api/pod/logs", s.handleLogs)
+	r.Delete("/api/pod/delete", s.handleDeletePod)
+	r.Get("/api/workload/describe", s.handleWorkloadDescribe)
+	r.Patch("/api/workload/scale", s.handleWorkloadScale)
+	r.Patch("/api/workload/resources", s.handleWorkloadResources)
+	r.Post("/api/workload/restart", s.handleWorkloadRestart)
+	r.Patch("/api/cronjob/schedule", s.handleCronJobSchedule)
+	r.Patch("/api/cronjob/suspend", s.handleCronJobSuspend)
+	r.Post("/api/cronjob/trigger", s.handleCronJobTrigger)
+	r.Get("/api/resource/describe", s.handleResourceDescribe)
+	r.Patch("/api/resource/edit", s.handleResourceEdit)
+	r.Get("/api/service/describe", s.handleServiceDescribe)
+	r.Get("/api/service/endpoints", s.handleServiceEndpoints)
+	r.Post("/api/service/portforward", s.handleServicePortForward)
+	r.Delete("/api/service/portforward", s.handleServicePortForwardStop)
 	r.Get("/ws", s.handleWS)
 	r.Handle("/*", http.FileServer(frontendFS))
 
@@ -68,42 +86,30 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	// Send initial snapshot before any broadcast can write to this connection.
+	// Send initial snapshot and register client under the same lock
+	// to prevent BroadcastEvents from writing concurrently.
 	snapshot := s.watcher.Snapshot()
 	nodes := s.watcher.SnapshotNodes()
 	services := s.watcher.SnapshotServices()
-	workloads := s.watcher.SnapshotWorkloads()
 	ingresses := s.watcher.SnapshotIngresses()
-	k8sEvents := s.watcher.SnapshotK8sEvents()
 	pvcs := s.watcher.SnapshotPVCs()
-	pvs := s.watcher.SnapshotPVs()
-	msg, err := json.Marshal(k8swatch.Event{
+	workloads := s.watcher.SnapshotWorkloads()
+	resources := s.watcher.SnapshotResources()
+	msg, _ := json.Marshal(k8swatch.Event{
 		Type:      "snapshot",
+		Context:   s.watcher.ContextName(),
 		Snapshot:  snapshot,
 		Nodes:     nodes,
 		Services:  services,
-		Workloads: workloads,
 		Ingresses: ingresses,
-		K8sEvents: k8sEvents,
 		PVCs:      pvcs,
-		PVs:       pvs,
+		Workloads: workloads,
+		Resources: resources,
 	})
-	if err != nil {
-		s.mu.Unlock()
-		log.Printf("ws marshal: %v", err)
-		conn.Close()
-		return
-	}
 
-	s.clients[conn] = struct{}{}
-	if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-		delete(s.clients, conn)
-		s.mu.Unlock()
-		log.Printf("ws initial snapshot: %v", err)
-		conn.Close()
-		return
-	}
+	s.mu.Lock()
+	conn.WriteMessage(websocket.TextMessage, msg)
+	s.clients[conn] = true
 	s.mu.Unlock()
 
 	// Keep connection alive, read (and discard) client messages
