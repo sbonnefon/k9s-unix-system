@@ -19,6 +19,8 @@ import {
   beamCone,
   glowMat,
   glowDisc,
+  minimap,
+  updateMinimapCamera,
 } from '../core/scene.js';
 import { statusColor } from '../core/materials.js';
 import { makeLabel, markBillboardsDirty } from '../rendering/labels.js';
@@ -259,12 +261,23 @@ function toggleEagleEye() {
   updateControlsHint();
 }
 
+function toggleMinimap() {
+  minimap.visible = !minimap.visible;
+  const el = document.getElementById('minimap');
+  el.style.display = minimap.visible ? 'block' : 'none';
+  if (minimap.visible) {
+    const { extent } = computeLayoutExtent();
+    updateMinimapCamera(camera, extent);
+  }
+  updateControlsHint();
+}
+
 function updateControlsHint() {
   const hint = document.getElementById('controls-hint');
   if (eagleEye.active) {
-    hint.textContent = 'EAGLE EYE \u2022 WASD/Arrows: Pan \u2022 Scroll: Zoom \u2022 E: Exit';
+    hint.textContent = 'EAGLE EYE \u2022 WASD/Arrows: Pan \u2022 Scroll: Zoom \u2022 E: Exit \u2022 M: Minimap';
   } else {
-    hint.textContent = 'WASD/Arrows: Move \u00b7 Mouse: Look \u00b7 Shift: Fast \u00b7 Space/Ctrl: Up/Down \u00b7 Click: Lock cursor \u00b7 Esc: Unlock \u00b7 E: Eagle Eye';
+    hint.textContent = 'WASD/Arrows: Move \u00b7 Mouse: Look \u00b7 Shift: Fast \u00b7 Space/Ctrl: Up/Down \u00b7 Click: Lock cursor \u00b7 Esc: Unlock \u00b7 E: Eagle Eye \u00b7 M: Minimap';
   }
 }
 
@@ -297,6 +310,12 @@ function updateCamera(dt) {
 
   velocity.lerp(direction.multiplyScalar(speed), 0.1);
   camera.position.addScaledVector(velocity, dt);
+
+  // Update minimap camera to follow main camera
+  if (minimap.visible) {
+    const { extent } = computeLayoutExtent();
+    updateMinimapCamera(camera, extent);
+  }
 }
 
 // ── Keyboard events ─────────────────────────────────────────────
@@ -305,6 +324,11 @@ document.addEventListener('keydown', (e) => {
 
   if (e.code === 'KeyE' && !e.repeat) {
     toggleEagleEye();
+    return;
+  }
+
+  if (e.code === 'KeyM' && !e.repeat) {
+    toggleMinimap();
     return;
   }
 
@@ -376,6 +400,7 @@ export {
   cancelFlyTo,
   startFlyTo,
   toggleEagleEye,
+  toggleMinimap,
   showPodLabels,
   clearPodLabels,
   updateCamera,

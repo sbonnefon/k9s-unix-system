@@ -158,6 +158,92 @@ groundPlane.rotation.x = -Math.PI / 2;
 groundPlane.position.y = -0.5;
 scene.add(groundPlane);
 
+// ── Minimap ──────────────────────────────────────────────────────
+const minimapCanvas = document.getElementById('minimap-canvas');
+const minimapRenderer = new THREE.WebGLRenderer({ canvas: minimapCanvas, antialias: false, alpha: true });
+minimapRenderer.setPixelRatio(1); // low-res for perf
+minimapRenderer.setClearColor(0x000000, 0.6);
+
+const MINIMAP_SIZE = 200;
+const minimapCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 5000);
+minimapCamera.position.set(0, 200, 0);
+minimapCamera.lookAt(0, 0, 0);
+
+const minimap = {
+  visible: false,
+  zoom: 60,
+};
+
+// Camera position dot — rendered as a small sprite on the minimap
+const dotTexture = (() => {
+  const size = 16;
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d');
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, size / 2 - 1, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.strokeStyle = '#00ff88';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  return new THREE.CanvasTexture(c);
+})();
+
+const dotSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: dotTexture,
+  depthTest: false,
+  transparent: true,
+}));
+dotSprite.scale.set(2, 2, 1);
+dotSprite.visible = false;
+scene.add(dotSprite);
+
+// Frustum cone — shows camera look direction on minimap
+const frustumGeo = new THREE.ConeGeometry(1.5, 4, 3);
+frustumGeo.rotateX(Math.PI / 2);
+const frustumMat = new THREE.MeshBasicMaterial({
+  color: 0x00ff88,
+  transparent: true,
+  opacity: 0.5,
+  depthTest: false,
+});
+const frustumCone = new THREE.Mesh(frustumGeo, frustumMat);
+frustumCone.visible = false;
+scene.add(frustumCone);
+
+function updateMinimapCamera(mainCamera, extent) {
+  const half = (extent || minimap.zoom) / 2;
+  const aspect = 1; // square minimap
+  minimapCamera.left   = -half * aspect;
+  minimapCamera.right  =  half * aspect;
+  minimapCamera.top    =  half;
+  minimapCamera.bottom = -half;
+  minimapCamera.position.set(mainCamera.position.x, 200, mainCamera.position.z);
+  minimapCamera.lookAt(mainCamera.position.x, 0, mainCamera.position.z);
+  minimapCamera.updateProjectionMatrix();
+
+  // Update dot position
+  dotSprite.position.set(mainCamera.position.x, 199, mainCamera.position.z);
+  dotSprite.visible = minimap.visible;
+
+  // Update frustum cone direction
+  frustumCone.position.set(mainCamera.position.x, 198, mainCamera.position.z);
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(mainCamera.quaternion);
+  frustumCone.rotation.y = Math.atan2(-dir.x, -dir.z);
+  frustumCone.visible = minimap.visible;
+}
+
+function renderMinimap() {
+  if (!minimap.visible) return;
+  minimapRenderer.render(scene, minimapCamera);
+}
+
+function resizeMinimap() {
+  minimapRenderer.setSize(MINIMAP_SIZE, MINIMAP_SIZE);
+}
+resizeMinimap();
+
 export {
   canvas,
   renderer,
@@ -181,4 +267,8 @@ export {
   beamCone,
   glowMat,
   glowDisc,
+  minimap,
+  updateMinimapCamera,
+  renderMinimap,
+  resizeMinimap,
 };

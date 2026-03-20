@@ -7,6 +7,8 @@ import {
   composer,
   updateOrthoFrustum,
   pointLight,
+  renderMinimap,
+  resizeMinimap,
 } from './core/scene.js';
 
 // ── Rendering ───────────────────────────────────────────────────
@@ -167,6 +169,7 @@ window.addEventListener('resize', () => {
   updateOrthoFrustum();
   renderer.setSize(window.innerWidth, window.innerHeight);
   composer.setSize(window.innerWidth, window.innerHeight);
+  resizeMinimap();
 });
 
 // ── Animation Loop ─────────────────────────────────────────────
@@ -189,6 +192,7 @@ function animate() {
   pointLight.position.z = Math.cos(time * 0.3) * 20;
 
   composer.render();
+  renderMinimap();
 }
 
 // ── Boot ───────────────────────────────────────────────────────
