@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { scene, canvas, activeCamera } from '../core/scene.js';
 import { podURLs } from '../rendering/ingresses.js';
 import { openWorkloadEdit } from './workload-edit.js';
+import { openResourceMenu } from './resource-menu.js';
 
 // ── Pod Actions (double-click menu) ────────────────────────────
 const podMenu = document.getElementById('pod-menu');
@@ -232,10 +233,12 @@ canvas.addEventListener('dblclick', (e) => {
   const podMeshes = [];
   const wlMeshes = [];
   const svcMeshes = [];
+  const resMeshes = [];
   scene.traverse((obj) => {
     if (obj.isMesh && obj.userData.type === 'pod') podMeshes.push(obj);
     if (obj.isMesh && obj.userData.type === 'workload') wlMeshes.push(obj);
     if (obj.isMesh && obj.userData.type === 'service') svcMeshes.push(obj);
+    if (obj.isMesh && obj.userData.type === 'resource') resMeshes.push(obj);
   });
 
   // Prioritize pod hits
@@ -285,6 +288,17 @@ canvas.addEventListener('dblclick', (e) => {
     _svcMenu.style.display = 'block';
     e.stopPropagation();
     return;
+  }
+
+  // Check resource hits
+  const resHits = dblRay.intersectObjects(resMeshes);
+  if (resHits.length > 0) {
+    const resource = resHits[0].object.userData.resource;
+    if (resource && resource.kind === 'ConfigMap') {
+      openResourceMenu(resource, e.clientX, e.clientY);
+      e.stopPropagation();
+      return;
+    }
   }
 
   // Check workload hits

@@ -414,3 +414,15 @@
 }
 #wl-edit-status.success { color: #00ff88; }
 #wl-edit-status.error { color: #ff4444; }
+
+/* Resource action menu */
+#resource-menu { position:fixed; display:none; z-index:30; background:rgba(10,20,20,0.95); border:1px solid #66bbcc; padding:0; font-size:13px; box-shadow:0 0 30px rgba(102,187,204,0.4); min-width:220px; }
+#resource-menu .menu-header { padding:8px 14px; font-weight:bold; font-size:14px; color:#66bbcc; border-bottom:1px solid rgba(102,187,204,0.3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#resource-menu .menu-item { padding:8px 14px; cursor:pointer; display:flex; align-items:center; gap:10px; color:#66bbcc; }
+#resource-menu .menu-item:hover { background:rgba(102,187,204,0.15); }
+#resource-menu .menu-key { display:inline-block; width:20px; height:20px; line-height:20px; text-align:center; border:1px solid #66bbcc; font-size:11px; flex-shrink:0; color:#66bbcc; }
+#resource-edit-panel { position:fixed; display:none; z-index:35; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(5,15,15,0.97); border:1px solid #66bbcc; padding:0; font-size:13px; box-shadow:0 0 40px rgba(102,187,204,0.3); min-width:400px; max-width:600px; max-height:80vh; overflow-y:auto; }
+.resource-key-label { color:#66bbcc; font-size:12px; font-weight:bold; margin-bottom:4px; margin-top:10px; }
+.resource-key-label:first-child { margin-top:0; }
+.resource-value-input { width:100%; min-height:60px; background:rgba(0,20,15,0.8); border:1px solid rgba(102,187,204,0.3); color:#00ff88; font-family:'Courier New',monospace; font-size:12px; padding:6px 8px; resize:vertical; }
+.resource-value-input:focus { border-color:#66bbcc; box-shadow:0 0 6px rgba(102,187,204,0.3); }

@@ -54,6 +54,7 @@ import {
   doServicePortForward,
 } from './interaction/svc-menu.js';
 import { wlEditPanel, closeWorkloadEdit } from './interaction/workload-edit.js';
+import { closeResourceMenu, closeResourceEdit } from './interaction/resource-menu.js';
 import { ingressPanel, closeIngressPanel } from './interaction/ingress-panel.js';
 
 // ── Network ─────────────────────────────────────────────────────
@@ -88,6 +89,14 @@ document.addEventListener('click', (e) => {
   }
   if (wlEditPanel.style.display === 'block' && !wlEditPanel.contains(e.target)) {
     closeWorkloadEdit();
+  }
+  const resourceMenu = document.getElementById('resource-menu');
+  if (resourceMenu && resourceMenu.style.display === 'block' && !resourceMenu.contains(e.target) && !outputPanel.contains(e.target)) {
+    closeResourceMenu();
+  }
+  const resourceEditPanel = document.getElementById('resource-edit-panel');
+  if (resourceEditPanel && resourceEditPanel.style.display === 'block' && !resourceEditPanel.contains(e.target)) {
+    closeResourceEdit();
   }
 });
 
