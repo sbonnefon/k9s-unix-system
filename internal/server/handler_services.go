@@ -102,7 +102,8 @@ func (s *Server) handleServiceDescribe(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(desc)
 }
 
-// handleServiceEndpoints returns the resolved endpoints for a service.
+// handleServiceEndpoints returns the resolved endpoints for a service
+// using discovery.k8s.io/v1 EndpointSlice API.
 func (s *Server) handleServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 	ns := r.URL.Query().Get("namespace")
 	name := r.URL.Query().Get("name")
@@ -114,7 +115,9 @@ func (s *Server) handleServiceEndpoints(w http.ResponseWriter, r *http.Request) 
 	client := s.watcher.K8sClient()
 	ctx := r.Context()
 
-	ep, err := client.CoreV1().Endpoints(ns).Get(ctx, name, metav1.GetOptions{})
+	sliceList, err := client.DiscoveryV1().EndpointSlices(ns).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("kubernetes.io/service-name=%s", name),
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -137,36 +140,41 @@ func (s *Server) handleServiceEndpoints(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var subsets []EndpointSubset
-	for _, sub := range ep.Subsets {
-		s := EndpointSubset{}
-		for _, addr := range sub.Addresses {
-			ea := EndpointAddress{IP: addr.IP, Ready: true}
-			if addr.NodeName != nil {
-				ea.NodeName = *addr.NodeName
+	for _, slice := range sliceList.Items {
+		sub := EndpointSubset{}
+
+		for _, port := range slice.Ports {
+			ep := EndpointPort{}
+			if port.Name != nil {
+				ep.Name = *port.Name
 			}
-			if addr.TargetRef != nil && addr.TargetRef.Kind == "Pod" {
-				ea.PodName = addr.TargetRef.Name
+			if port.Port != nil {
+				ep.Port = *port.Port
 			}
-			s.Addresses = append(s.Addresses, ea)
+			if port.Protocol != nil {
+				ep.Protocol = string(*port.Protocol)
+			}
+			sub.Ports = append(sub.Ports, ep)
 		}
-		for _, addr := range sub.NotReadyAddresses {
-			ea := EndpointAddress{IP: addr.IP, Ready: false}
-			if addr.NodeName != nil {
-				ea.NodeName = *addr.NodeName
+
+		for _, endpoint := range slice.Endpoints {
+			ready := endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready
+			for _, addr := range endpoint.Addresses {
+				ea := EndpointAddress{IP: addr, Ready: ready}
+				if endpoint.NodeName != nil {
+					ea.NodeName = *endpoint.NodeName
+				}
+				if endpoint.TargetRef != nil && endpoint.TargetRef.Kind == "Pod" {
+					ea.PodName = endpoint.TargetRef.Name
+				}
+				sub.Addresses = append(sub.Addresses, ea)
 			}
-			if addr.TargetRef != nil && addr.TargetRef.Kind == "Pod" {
-				ea.PodName = addr.TargetRef.Name
-			}
-			s.Addresses = append(s.Addresses, ea)
 		}
-		for _, p := range sub.Ports {
-			s.Ports = append(s.Ports, EndpointPort{
-				Name:     p.Name,
-				Port:     p.Port,
-				Protocol: string(p.Protocol),
-			})
+
+		// Only include slices that have addresses
+		if len(sub.Addresses) > 0 || len(sub.Ports) > 0 {
+			subsets = append(subsets, sub)
 		}
-		subsets = append(subsets, s)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
