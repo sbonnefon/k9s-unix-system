@@ -1,0 +1,65 @@
+name: git_atomic_commit
+description: Create one atomic Git commit using Angular/Conventional Commit format, staging only relevant files and hunks for a single functional intention.
+inputs:
+  type:
+    type: string
+    allowed:
+      - feat
+      - fix
+      - refactor
+      - docs
+      - test
+      - build
+      - ci
+      - perf
+      - style
+      - chore
+      - revert
+  scope:
+    type: string
+  summary:
+    type: string
+  intent_description:
+    type: string
+  include_files:
+    type: array
+    items: string
+  exclude_files:
+    type: array
+    items: string
+  include_patterns:
+    type: array
+    items: string
+  exclude_patterns:
+    type: array
+    items: string
+  allow_partial_hunks:
+    type: boolean
+    default: true
+  run_checks:
+    type: boolean
+    default: true
+  checks:
+    type: array
+    items: string
+outputs:
+  status:
+    type: string
+  commit_message:
+    type: string
+  commit_sha:
+    type: string
+  staged_files:
+    type: array
+    items: string
+  partial_hunks_used:
+    type: boolean
+  left_unstaged_files:
+    type: array
+    items: string
+rules:
+  - Only one functional intent per commit
+  - Use Angular commit format
+  - Prefer partial staging when needed
+  - Never include secrets or unrelated debug changes
+  - Refuse commit if isolation is unsafe
