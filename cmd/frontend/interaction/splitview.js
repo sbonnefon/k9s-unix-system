@@ -11,10 +11,16 @@ const splitView = {
   active: false,
   count: 0,        // 0=off, 4, 6, 8
   cameras: [],     // PerspectiveCamera[]
-  targets: [],     // { nsName, wlName, wlKind, worldPos, bbox }[]
+  targets: [],     // { nsName, worldPos, bbox }[]
   offset: 0,       // pagination offset for N/P
   time: 0,         // elapsed time for gentle orbit
   dots: [],        // minimap dot sprites for split cameras
+  // Tour mode (T while in split)
+  tour: false,
+  tourAngle: 0,     // current orbit angle for the tour
+  tourLaps: 0,      // completed laps on current page
+  tourLapsTarget: 2,
+  tourOrbitSpeed: 0.4, // radians/s
 };
 
 // Grid layouts for each split count
@@ -50,12 +56,17 @@ function rankNamespaces() {
       }
     }
 
-    // Compute bounding box from the namespace platform
+    // Compute bounding box from the namespace group (platform + all children)
     const worldPos = new THREE.Vector3();
     ns.group.getWorldPosition(worldPos);
 
     const bbox = new THREE.Box3();
-    // Include all pod positions for accurate framing
+    // Use the platform mesh for base size (it defines the namespace island)
+    if (ns.platform) {
+      const platBox = new THREE.Box3().setFromObject(ns.platform);
+      bbox.union(platBox);
+    }
+    // Also include all pod positions
     for (const [, mesh] of ns.pods) {
       const wp = new THREE.Vector3();
       mesh.getWorldPosition(wp);
@@ -63,9 +74,9 @@ function rankNamespaces() {
     }
 
     if (bbox.isEmpty()) {
-      bbox.setFromCenterAndSize(worldPos, new THREE.Vector3(6, 2, 6));
+      bbox.setFromCenterAndSize(worldPos, new THREE.Vector3(10, 2, 10));
     } else {
-      bbox.expandByScalar(2);
+      bbox.expandByScalar(3);
     }
 
     const entry = { nsName, worldPos, bbox, hasError };
@@ -94,15 +105,31 @@ function ensureCameras(count) {
 function fitCameraToBox(cam, bbox, center) {
   const size = new THREE.Vector3();
   bbox.getSize(size);
-  const maxDim = Math.max(size.x, size.z, 3); // minimum 3 units
+  const maxDim = Math.max(size.x, size.z, 6); // minimum 6 units
   const fov = cam.fov * (Math.PI / 180);
-  const distance = (maxDim / 2) / Math.tan(fov / 2) + 2;
+  // Distance to see the full bbox width + generous margin
+  const distance = (maxDim / 2) / Math.tan(fov / 2) * 1.4;
 
-  // Fixed elevated position — no orbit jitter
+  // Elevated position looking down at ~45°
   cam.position.set(
-    center.x + distance * 0.3,
-    center.y + distance * 0.8,
+    center.x,
+    center.y + distance * 0.9,
     center.z + distance * 0.5,
+  );
+  cam.lookAt(center);
+}
+
+function orbitCameraAroundBox(cam, bbox, center, angle) {
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+  const maxDim = Math.max(size.x, size.z, 6);
+  const fov = cam.fov * (Math.PI / 180);
+  const distance = (maxDim / 2) / Math.tan(fov / 2) * 1.4;
+
+  cam.position.set(
+    center.x + Math.cos(angle) * distance * 0.5,
+    center.y + distance * 0.9,
+    center.z + Math.sin(angle) * distance * 0.5,
   );
   cam.lookAt(center);
 }
@@ -115,7 +142,7 @@ function updateSplitCameras(dt) {
   const count = splitView.count;
   const offset = splitView.offset;
 
-  // Select workloads for current page
+  // Select namespaces for current page
   splitView.targets = [];
   for (let i = 0; i < count; i++) {
     const idx = offset + i;
@@ -124,11 +151,39 @@ function updateSplitCameras(dt) {
     }
   }
 
-  // Position each camera to fit its workload bounding box
-  for (let i = 0; i < splitView.targets.length; i++) {
-    const target = splitView.targets[i];
-    const cam = splitView.cameras[i];
-    fitCameraToBox(cam, target.bbox, target.worldPos);
+  // Tour mode: orbit cameras and auto-advance pages
+  if (splitView.tour) {
+    splitView.tourAngle += splitView.tourOrbitSpeed * dt;
+
+    if (splitView.tourAngle >= Math.PI * 2) {
+      splitView.tourAngle -= Math.PI * 2;
+      splitView.tourLaps++;
+
+      if (splitView.tourLaps >= splitView.tourLapsTarget) {
+        // Advance to next page
+        splitView.tourLaps = 0;
+        const maxOffset = Math.max(0, ranked.length - count);
+        splitView.offset += count;
+        if (splitView.offset > maxOffset) {
+          splitView.offset = 0; // wrap around
+        }
+        updateSplitViewHUD();
+      }
+    }
+
+    for (let i = 0; i < splitView.targets.length; i++) {
+      const target = splitView.targets[i];
+      const cam = splitView.cameras[i];
+      const phaseOffset = i * 0.3;
+      orbitCameraAroundBox(cam, target.bbox, target.worldPos, splitView.tourAngle + phaseOffset);
+    }
+  } else {
+    // Static mode: fixed camera position
+    for (let i = 0; i < splitView.targets.length; i++) {
+      const target = splitView.targets[i];
+      const cam = splitView.cameras[i];
+      fitCameraToBox(cam, target.bbox, target.worldPos);
+    }
   }
 
   // Update minimap dots
@@ -373,6 +428,9 @@ function toggleSplitView() {
     splitView.active = false;
     splitView.count = 0;
     splitView.offset = 0;
+    splitView.tour = false;
+    splitView.tourLaps = 0;
+    splitView.tourAngle = 0;
     removeLabelOverlay();
     cleanupMinimapDots();
 
@@ -397,6 +455,16 @@ function navigateSplitView(direction) {
   const maxOffset = Math.max(0, ranked.length - splitView.count);
 
   splitView.offset = Math.max(0, Math.min(maxOffset, splitView.offset + direction * splitView.count));
+  splitView.tourLaps = 0;
+  splitView.tourAngle = 0;
+  updateSplitViewHUD();
+}
+
+function toggleSplitTour() {
+  if (!splitView.active) return;
+  splitView.tour = !splitView.tour;
+  splitView.tourAngle = 0;
+  splitView.tourLaps = 0;
   updateSplitViewHUD();
 }
 
@@ -417,7 +485,8 @@ function updateSplitViewHUD() {
     const page = Math.floor(splitView.offset / splitView.count) + 1;
     const totalPages = Math.max(1, Math.ceil(ranked.length / splitView.count));
     el.style.opacity = '1';
-    el.textContent = `SPLIT ${splitView.count}x | ${errorCount} errors | Page ${page}/${totalPages} [N/P: navigate, S: cycle]`;
+    const tourLabel = splitView.tour ? ' | TOUR ON' : '';
+    el.textContent = `SPLIT ${splitView.count}x | ${errorCount} errors | Page ${page}/${totalPages}${tourLabel} [T: tour, N/P: navigate, S: cycle]`;
   } else {
     el.style.opacity = '0';
   }
@@ -426,6 +495,7 @@ function updateSplitViewHUD() {
 export {
   splitView,
   toggleSplitView,
+  toggleSplitTour,
   navigateSplitView,
   updateSplitCameras,
   renderSplitView,

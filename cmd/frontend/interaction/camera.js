@@ -27,7 +27,7 @@ import { makeLabel, markBillboardsDirty } from '../rendering/labels.js';
 import { computeLayoutExtent } from '../rendering/namespaces.js';
 import { setPointerLocked } from './raycast.js';
 import { toggleAutopilot, stopAutopilot, autopilot } from './autopilot.js';
-import { toggleSplitView, navigateSplitView, splitView } from './splitview.js';
+import { toggleSplitView, toggleSplitTour, navigateSplitView, splitView } from './splitview.js';
 
 // ── Fly Camera Controller ──────────────────────────────────────
 const velocity = new THREE.Vector3();
@@ -335,7 +335,11 @@ document.addEventListener('keydown', (e) => {
   }
 
   if (e.code === 'KeyT' && !e.repeat) {
-    toggleAutopilot();
+    if (splitView.active) {
+      toggleSplitTour();
+    } else {
+      toggleAutopilot();
+    }
     return;
   }
 
