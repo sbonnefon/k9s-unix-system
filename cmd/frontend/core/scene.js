@@ -55,7 +55,7 @@ function updateOrthoFrustum() {
 const renderPass = new RenderPass(scene, camera);
 const composer = new EffectComposer(renderer);
 composer.addPass(renderPass);
-const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.6, 0.4, 0.85);
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth / 2, window.innerHeight / 2), 0.6, 0.4, 0.85);
 composer.addPass(bloom);
 
 // Horizon gradient sky (Jurassic Park FSN style)
