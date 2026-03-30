@@ -28,6 +28,15 @@ function rebuildServiceLines() {
   const TUBE_SEGMENTS = 20;
   const TUBE_RADIAL = 6;
 
+  const sharedTubeMat = new THREE.MeshPhongMaterial({
+    color: 0x00aaff,
+    emissive: 0x004466,
+    emissiveIntensity: 0.5,
+    transparent: true,
+    opacity: 0.35,
+    depthWrite: false,
+  });
+
   for (const svc of state.services) {
     if (!svc.selector || Object.keys(svc.selector).length === 0) continue;
 
@@ -58,22 +67,13 @@ function rebuildServiceLines() {
     center.y += 2.5;
 
     // Draw tubes from center to each matched pod
-    const tubeMat = new THREE.MeshPhongMaterial({
-      color: 0x00aaff,
-      emissive: 0x004466,
-      emissiveIntensity: 0.5,
-      transparent: true,
-      opacity: 0.35,
-      depthWrite: false,
-    });
-
     for (const podMesh of matchedMeshes) {
       const target = worldPos(podMesh);
       const mid = center.clone().add(target).multiplyScalar(0.5);
       mid.y += 1.0;
       const curve = new THREE.QuadraticBezierCurve3(center, mid, target);
       const tubeGeo = new THREE.TubeGeometry(curve, TUBE_SEGMENTS, TUBE_RADIUS, TUBE_RADIAL, false);
-      const tube = new THREE.Mesh(tubeGeo, tubeMat.clone());
+      const tube = new THREE.Mesh(tubeGeo, sharedTubeMat);
       tube.userData = {
         type: 'service',
         service: svc,
