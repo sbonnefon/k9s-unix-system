@@ -292,28 +292,27 @@ function updateCamera(dt) {
     eagleEye.panZ += dz * speed * dt;
     orthoCamera.position.set(eagleEye.panX, 100, eagleEye.panZ);
     orthoCamera.lookAt(eagleEye.panX, 0, eagleEye.panZ);
-    return;
+  } else if (flyTo.active) {
+    updateFlyTo(dt);
+  } else {
+    const speed = keys['ShiftLeft'] || keys['ShiftRight'] ? 20 : 7.5;
+    const direction = new THREE.Vector3();
+
+    if (keys['KeyW'] || keys['ArrowUp']) direction.z -= 1;
+    if (keys['KeyS'] || keys['ArrowDown']) direction.z += 1;
+    if (keys['KeyA'] || keys['ArrowLeft']) direction.x -= 1;
+    if (keys['KeyD'] || keys['ArrowRight']) direction.x += 1;
+    if (keys['Space']) direction.y += 1;
+    if (keys['ControlLeft'] || keys['ControlRight']) direction.y -= 1;
+
+    direction.normalize();
+    direction.applyQuaternion(camera.quaternion);
+
+    velocity.lerp(direction.multiplyScalar(speed), 0.1);
+    camera.position.addScaledVector(velocity, dt);
   }
 
-  if (flyTo.active) { updateFlyTo(dt); return; }
-
-  const speed = keys['ShiftLeft'] || keys['ShiftRight'] ? 20 : 7.5;
-  const direction = new THREE.Vector3();
-
-  if (keys['KeyW'] || keys['ArrowUp']) direction.z -= 1;
-  if (keys['KeyS'] || keys['ArrowDown']) direction.z += 1;
-  if (keys['KeyA'] || keys['ArrowLeft']) direction.x -= 1;
-  if (keys['KeyD'] || keys['ArrowRight']) direction.x += 1;
-  if (keys['Space']) direction.y += 1;
-  if (keys['ControlLeft'] || keys['ControlRight']) direction.y -= 1;
-
-  direction.normalize();
-  direction.applyQuaternion(camera.quaternion);
-
-  velocity.lerp(direction.multiplyScalar(speed), 0.1);
-  camera.position.addScaledVector(velocity, dt);
-
-  // Update minimap camera to follow main camera
+  // Update minimap camera — always when visible, regardless of mode
   if (minimap.visible) {
     const { extent } = computeLayoutExtent();
     updateMinimapCamera(camera, extent);
