@@ -15,6 +15,7 @@ import { platformMaterial, forbiddenPlatformMaterial } from '../core/materials.j
 import { makeLabel, makeBeveledPlatformGeo } from './labels.js';
 import { rebuildNodeIsland, layoutNodeIsland } from './nodes.js';
 import { invalidateMeshCache } from '../interaction/raycast.js';
+import { syncAllInstances, cleanupNamespaceInstances } from './pods.js';
 
 // These will be set by app.js to break circular dependency with camera.js
 let _euler = null;
@@ -45,6 +46,7 @@ function ensureNamespace(name, forbidden = false) {
 function removeNamespace(name) {
   const ns = state.namespaces.get(name);
   if (!ns) return;
+  cleanupNamespaceInstances(ns, name);
   for (const [, mesh] of ns.pods) {
     // geometry is shared -- don't dispose it
     mesh.material.dispose();
@@ -327,6 +329,9 @@ function layoutNamespaces() {
       );
     }
   });
+
+  // Sync InstancedMesh transforms after all pods have been positioned
+  syncAllInstances();
 
   // On first layout, pull camera back to show all islands
   if (!layoutNamespaces._initialDone && entries.length > 0) {

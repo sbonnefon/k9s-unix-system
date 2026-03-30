@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { state } from '../core/state.js';
 import { activeCamera, eagleEye } from '../core/scene.js';
+import { setNamespaceInstancedOpacity } from './pods.js';
 
 // ── Depth transparency ─────────────────────────────────────────
 const DEPTH_FADE_START = 60;
@@ -39,9 +40,8 @@ function updateDepthTransparency() {
     if (ns.platform) ns.platform.material.opacity = BASE_PLATFORM_OPACITY * f;
     if (ns.label) ns.label.material.opacity = BASE_LABEL_OPACITY * f;
 
-    for (const [, mesh] of ns.pods) {
-      mesh.material.opacity = BASE_POD_OPACITY * f;
-    }
+    // Update InstancedMesh material opacity for this namespace
+    setNamespaceInstancedOpacity(ns, BASE_POD_OPACITY * f);
   }
 
   // Node island

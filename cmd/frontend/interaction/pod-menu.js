@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { state } from '../core/state.js';
 import { scene, canvas, activeCamera } from '../core/scene.js';
 import { podURLs } from '../rendering/ingresses.js';
 import { openWorkloadEdit } from './workload-edit.js';
@@ -235,14 +236,26 @@ canvas.addEventListener('dblclick', (e) => {
   const svcMeshes = [];
   const resMeshes = [];
   scene.traverse((obj) => {
-    if (obj.isMesh && obj.userData.type === 'pod') podMeshes.push(obj);
     if (obj.isMesh && obj.userData.type === 'workload') wlMeshes.push(obj);
     if (obj.isMesh && obj.userData.type === 'service') svcMeshes.push(obj);
     if (obj.isMesh && obj.userData.type === 'resource') resMeshes.push(obj);
   });
+  // Pod meshes are invisible (rendered via InstancedMesh) — collect from state
+  for (const [, ns] of state.namespaces) {
+    for (const [, mesh] of ns.pods) {
+      podMeshes.push(mesh);
+    }
+  }
+
+  // Temporarily make invisible pods visible for raycasting
+  const invisiblePods = podMeshes.filter(m => !m.visible);
+  for (const m of invisiblePods) m.visible = true;
 
   // Prioritize pod hits
   const podHits = dblRay.intersectObjects(podMeshes);
+
+  // Restore invisibility
+  for (const m of invisiblePods) m.visible = false;
   if (podHits.length > 0) {
     const pod = podHits[0].object.userData.pod;
     if (!pod) return;

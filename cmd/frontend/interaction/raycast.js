@@ -3,6 +3,11 @@ import { state } from '../core/state.js';
 import { scene, canvas, activeCamera } from '../core/scene.js';
 import { statusColor, formatBytes } from '../core/materials.js';
 import { markBillboardsDirty } from '../rendering/labels.js';
+import { applyInstanceHover, removeInstanceHover } from '../rendering/pods.js';
+
+// Pod meshes are invisible (rendered via InstancedMesh) but still raycastable.
+// scene.traverse visits them regardless of visibility; the raycaster is the one
+// that skips invisible objects, so we temporarily flip visibility during raycast.
 
 // ── Raycasting (hover tooltip) ─────────────────────────────────
 const raycaster = new THREE.Raycaster();
@@ -40,6 +45,8 @@ function rebuildMeshCache() {
   _cachedNsTargets = [];
   scene.traverse((obj) => {
     if (obj.isMesh && HOVERABLE_TYPES.has(obj.userData.type)) {
+      // Pod meshes are invisible (rendered via InstancedMesh) but still included
+      // for raycasting — traverse visits them regardless of visibility.
       _cachedHoverTargets.push(obj);
     }
     if (obj.userData.type === 'namespace' || obj.userData.type === 'label' || obj.userData.type === 'ingressArch') {
@@ -252,16 +259,39 @@ function updateRaycast() {
     canvas.style.cursor = nsHits.length > 0 ? 'pointer' : 'default';
   }
 
+  // Temporarily make invisible pod meshes visible for raycasting
+  const invisiblePods = [];
+  for (const obj of _cachedHoverTargets) {
+    if (!obj.visible && obj.userData.type === 'pod') {
+      obj.visible = true;
+      invisiblePods.push(obj);
+    }
+  }
+
   const intersects = raycaster.intersectObjects(_cachedHoverTargets);
 
+  // Restore invisibility
+  for (const obj of invisiblePods) {
+    obj.visible = false;
+  }
+
   if (hoveredMesh) {
-    removeHoverHighlight(hoveredMesh);
+    if (hoveredMesh.userData.type === 'pod') {
+      removeInstanceHover();
+    } else {
+      removeHoverHighlight(hoveredMesh);
+    }
     hoveredMesh = null;
   }
 
   if (intersects.length > 0) {
     hoveredMesh = intersects[0].object;
-    applyHoverHighlight(hoveredMesh);
+    if (hoveredMesh.userData.type === 'pod') {
+      const pod = hoveredMesh.userData.pod;
+      if (pod) applyInstanceHover(pod.namespace, pod.name);
+    } else {
+      applyHoverHighlight(hoveredMesh);
+    }
     canvas.style.cursor = 'pointer';
 
     const html = buildTooltipHTML(hoveredMesh);
