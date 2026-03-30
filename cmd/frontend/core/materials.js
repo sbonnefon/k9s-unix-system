@@ -38,15 +38,19 @@ const forbiddenPlatformMaterial = new THREE.MeshPhongMaterial({
   opacity: 0.6,
 });
 
+const _podMatCache = {};
 function podMaterial(status) {
+  if (_podMatCache[status]) return _podMatCache[status];
   const color = statusColor(status);
-  return new THREE.MeshPhongMaterial({
+  const mat = new THREE.MeshPhongMaterial({
     color,
     emissive: new THREE.Color(color).multiplyScalar(0.3),
     shininess: 60,
     transparent: true,
     opacity: 0.9,
   });
+  _podMatCache[status] = mat;
+  return mat;
 }
 
 function podWidth(cpuMillis) {
@@ -75,15 +79,19 @@ const NODE_BLOCK_COLORS = {
   NotReady: 0xff4444,
 };
 
+const _nodeMatCache = {};
 function nodeBlockMaterial(status) {
+  if (_nodeMatCache[status]) return _nodeMatCache[status];
   const color = NODE_BLOCK_COLORS[status] ?? 0x00ccff;
-  return new THREE.MeshPhongMaterial({
+  const mat = new THREE.MeshPhongMaterial({
     color,
     emissive: new THREE.Color(color).multiplyScalar(0.3),
     shininess: 60,
     transparent: true,
     opacity: 0.9,
   });
+  _nodeMatCache[status] = mat;
+  return mat;
 }
 
 export {

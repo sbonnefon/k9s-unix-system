@@ -69,7 +69,7 @@ function addOrUpdatePod(nsName, pod) {
 
   if (ns.pods.has(pod.name)) {
     const existing = ns.pods.get(pod.name);
-    existing.material.dispose();
+    // material is pooled — don't dispose, just reassign
     existing.material = podMaterial(pod.status);
     existing.geometry = podGeometry(pod.ownerKind);
     existing.scale.set(sx, sy, sz);
@@ -102,8 +102,7 @@ function removePod(nsName, podName) {
       r.material.dispose();
     }
     ns.group.remove(mesh);
-    // geometry is shared -- don't dispose it
-    mesh.material.dispose();
+    // geometry is shared, material is pooled -- don't dispose either
     ns.pods.delete(podName);
     invalidateMeshCache();
   }
