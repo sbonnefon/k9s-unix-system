@@ -30,6 +30,7 @@ import {
   updateSpotlight,
 } from './interaction/camera.js';
 import { updateAutopilot } from './interaction/autopilot.js';
+import { updateSplitCameras, renderSplitView, clearLabelOverlay } from './interaction/splitview.js';
 import { setRaycastDeps, updateRaycast } from './interaction/raycast.js';
 import {
   podMenu,
@@ -182,6 +183,7 @@ function animate() {
   const time = clock.getElapsedTime();
 
   updateAutopilot(dt);
+  updateSplitCameras(dt);
   updateCamera(dt);
   updateRaycast();
   updateSpotlight(dt);
@@ -193,7 +195,11 @@ function animate() {
   pointLight.position.x = Math.sin(time * 0.3) * 20;
   pointLight.position.z = Math.cos(time * 0.3) * 20;
 
-  composer.render();
+  // Split view renders its own viewports; otherwise use composer
+  clearLabelOverlay();
+  if (!renderSplitView()) {
+    composer.render();
+  }
   renderMinimap();
 }
 
