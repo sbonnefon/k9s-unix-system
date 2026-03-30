@@ -266,6 +266,10 @@ function renderSplitView() {
   renderer.setScissorTest(false);
   renderer.autoClear = true;
 
+  // Restore full viewport so minimap and other renderers work correctly
+  renderer.setViewport(0, 0, w, h);
+  renderer.setScissor(0, 0, w, h);
+
   // Draw 2D label overlay on top
   drawAllViewportLabels(layout, cellW, cellH);
 
