@@ -43,12 +43,28 @@ const RESOURCE_Y = -0.1;
 const RESOURCE_SPACING = RESOURCE_MARKER_SIZE * 2.5;
 const RESOURCE_EDGE_GAP = 1.2;
 
+// Shared geometries for InstancedMesh (never disposed)
+const _sharedGeo = new THREE.BoxGeometry(RESOURCE_MARKER_SIZE, RESOURCE_MARKER_SIZE * 0.6, RESOURCE_MARKER_SIZE);
+const _sharedDepGeo = new THREE.BoxGeometry(DEPENDENT_MARKER_SIZE, DEPENDENT_MARKER_SIZE * 0.6, DEPENDENT_MARKER_SIZE);
+
+const _tmpMatrix = new THREE.Matrix4();
+const _tmpPos = new THREE.Vector3();
+const _tmpQuat = new THREE.Quaternion();
+const _tmpScale = new THREE.Vector3(1, 1, 1);
+
 function rebuildResources() {
   if (state.resourceGroup) {
     scene.remove(state.resourceGroup);
     state.resourceGroup.traverse((child) => {
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) child.material.dispose();
+      // Don't dispose shared geometries; only dispose non-shared ones (lines, labels)
+      if (child.isInstancedMesh) {
+        // Dispose material only, geometry is shared
+        if (child.material) child.material.dispose();
+        child.dispose();
+      } else if (child.geometry && child.geometry !== _sharedGeo && child.geometry !== _sharedDepGeo) {
+        child.geometry.dispose();
+      }
+      if (!child.isInstancedMesh && child.material) child.material.dispose();
     });
   }
 
@@ -136,27 +152,17 @@ function rebuildResources() {
       const wrapCols = Math.ceil(resources.length / maxAlong);
       const stripBase = stripIdx * (wrapCols * RESOURCE_SPACING + RESOURCE_SPACING);
 
+      // First pass: compute positions and classify resources
+      const instanceData = []; // { res, position, isDependent, consumers }
       let edgeIdx = 0;
       for (let i = 0; i < resources.length; i++) {
         const res = resources[i];
-        const color = RESOURCE_COLORS[res.kind] || 0x777777;
         const depKey = nsName + '/' + res.kind + '/' + res.name;
         const consumers = dependencyMap.get(depKey);
         const isDependent = (res.kind === 'ConfigMap' || res.kind === 'Secret') && consumers && consumers.size > 0;
-        const markerSize = isDependent ? DEPENDENT_MARKER_SIZE : RESOURCE_MARKER_SIZE;
 
-        const geo = new THREE.BoxGeometry(markerSize, markerSize * 0.6, markerSize);
-        const mat = new THREE.MeshPhongMaterial({
-          color,
-          emissive: new THREE.Color(color).multiplyScalar(0.4),
-          transparent: true,
-          opacity: 0.8,
-        });
-        const mesh = new THREE.Mesh(geo, mat);
-
-        let mx, mz;
+        let mx, my, mz;
         if (isDependent) {
-          // Position near centroid of consuming pods
           let sumX = 0, sumZ = 0, count = 0;
           for (const podMesh of consumers) {
             const wp = new THREE.Vector3();
@@ -166,25 +172,8 @@ function rebuildResources() {
             count++;
           }
           mx = sumX / count;
+          my = 1.5;
           mz = sumZ / count + 0.8;
-          mesh.position.set(mx, 1.5, mz);
-
-          // Draw connection lines to each consuming pod
-          for (const podMesh of consumers) {
-            const wp = new THREE.Vector3();
-            podMesh.getWorldPosition(wp);
-            const lineGeo = new THREE.BufferGeometry().setFromPoints([
-              mesh.position.clone(),
-              wp,
-            ]);
-            const lineMat = new THREE.LineBasicMaterial({
-              color,
-              transparent: true,
-              opacity: 0.2,
-            });
-            const line = new THREE.Line(lineGeo, lineMat);
-            subGroup.add(line);
-          }
         } else {
           const along = edgeIdx % maxAlong;
           const perp = Math.floor(edgeIdx / maxAlong);
@@ -199,12 +188,79 @@ function rebuildResources() {
             mx = cx - halfW + along * RESOURCE_SPACING + RESOURCE_SPACING / 2;
             mz = cz + halfD + RESOURCE_EDGE_GAP + stripBase + perp * RESOURCE_SPACING;
           }
-          mesh.position.set(mx, RESOURCE_Y + RESOURCE_MARKER_SIZE / 2, mz);
+          my = RESOURCE_Y + RESOURCE_MARKER_SIZE / 2;
           edgeIdx++;
         }
 
-        mesh.userData = { type: 'resource', resource: res };
-        subGroup.add(mesh);
+        instanceData.push({ res, position: new THREE.Vector3(mx, my, mz), isDependent, consumers });
+      }
+
+      // Second pass: group by instancing key (kind + dependent flag)
+      const byInstanceKey = new Map();
+      for (const entry of instanceData) {
+        const key = entry.res.kind + (entry.isDependent ? '-dep' : '');
+        if (!byInstanceKey.has(key)) byInstanceKey.set(key, []);
+        byInstanceKey.get(key).push(entry);
+      }
+
+      // Third pass: create one InstancedMesh per group + invisible proxy meshes
+      for (const [instanceKey, entries] of byInstanceKey) {
+        const isDepGroup = instanceKey.endsWith('-dep');
+        const kind = isDepGroup ? instanceKey.slice(0, -4) : instanceKey;
+        const color = RESOURCE_COLORS[kind] || 0x777777;
+        const geo = isDepGroup ? _sharedDepGeo : _sharedGeo;
+
+        const mat = new THREE.MeshPhongMaterial({
+          color,
+          emissive: new THREE.Color(color).multiplyScalar(0.4),
+          transparent: true,
+          opacity: 0.8,
+        });
+
+        const im = new THREE.InstancedMesh(geo, mat, entries.length);
+        im.count = entries.length;
+        im.frustumCulled = false;
+        im.userData = { type: 'resourceInstanced' };
+
+        for (let i = 0; i < entries.length; i++) {
+          const { position } = entries[i];
+          _tmpPos.copy(position);
+          _tmpMatrix.compose(_tmpPos, _tmpQuat, _tmpScale);
+          im.setMatrixAt(i, _tmpMatrix);
+        }
+        im.instanceMatrix.needsUpdate = true;
+        subGroup.add(im);
+
+        // Create invisible proxy meshes for raycasting/tooltips
+        for (const entry of entries) {
+          const proxyGeo = isDepGroup ? _sharedDepGeo : _sharedGeo;
+          const proxy = new THREE.Mesh(proxyGeo, mat);
+          proxy.position.copy(entry.position);
+          proxy.visible = false; // invisible: rendering done by InstancedMesh
+          proxy.userData = { type: 'resource', resource: entry.res };
+          subGroup.add(proxy);
+        }
+      }
+
+      // Draw connection lines for dependent resources
+      for (const entry of instanceData) {
+        if (!entry.isDependent) continue;
+        const color = RESOURCE_COLORS[entry.res.kind] || 0x777777;
+        for (const podMesh of entry.consumers) {
+          const wp = new THREE.Vector3();
+          podMesh.getWorldPosition(wp);
+          const lineGeo = new THREE.BufferGeometry().setFromPoints([
+            entry.position.clone(),
+            wp,
+          ]);
+          const lineMat = new THREE.LineBasicMaterial({
+            color,
+            transparent: true,
+            opacity: 0.2,
+          });
+          const line = new THREE.Line(lineGeo, lineMat);
+          subGroup.add(line);
+        }
       }
 
       // Summary label at the start of each strip

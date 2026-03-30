@@ -259,19 +259,19 @@ function updateRaycast() {
     canvas.style.cursor = nsHits.length > 0 ? 'pointer' : 'default';
   }
 
-  // Temporarily make invisible pod meshes visible for raycasting
-  const invisiblePods = [];
+  // Temporarily make invisible pod/resource meshes visible for raycasting
+  const invisibleProxies = [];
   for (const obj of _cachedHoverTargets) {
-    if (!obj.visible && obj.userData.type === 'pod') {
+    if (!obj.visible && (obj.userData.type === 'pod' || obj.userData.type === 'resource')) {
       obj.visible = true;
-      invisiblePods.push(obj);
+      invisibleProxies.push(obj);
     }
   }
 
   const intersects = raycaster.intersectObjects(_cachedHoverTargets);
 
   // Restore invisibility
-  for (const obj of invisiblePods) {
+  for (const obj of invisibleProxies) {
     obj.visible = false;
   }
 
