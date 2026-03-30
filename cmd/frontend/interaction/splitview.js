@@ -102,34 +102,34 @@ function ensureCameras(count) {
   }
 }
 
-function fitCameraToBox(cam, bbox, center) {
+function computeFitDistance(cam, bbox) {
   const size = new THREE.Vector3();
   bbox.getSize(size);
-  const maxDim = Math.max(size.x, size.z, 6); // minimum 6 units
+  const maxDim = Math.max(size.x, size.z, 10);
   const fov = cam.fov * (Math.PI / 180);
-  // Distance to see the full bbox width + generous margin
-  const distance = (maxDim / 2) / Math.tan(fov / 2) * 1.4;
+  // Full frustum fit + 2x margin to guarantee the entire namespace is visible
+  return (maxDim / 2) / Math.tan(fov / 2) * 2.2;
+}
 
-  // Elevated position looking down at ~45°
+function fitCameraToBox(cam, bbox, center) {
+  const distance = computeFitDistance(cam, bbox);
+
+  // Near top-down view with slight angle for depth perception
   cam.position.set(
     center.x,
-    center.y + distance * 0.9,
-    center.z + distance * 0.5,
+    center.y + distance,
+    center.z + distance * 0.25,
   );
   cam.lookAt(center);
 }
 
 function orbitCameraAroundBox(cam, bbox, center, angle) {
-  const size = new THREE.Vector3();
-  bbox.getSize(size);
-  const maxDim = Math.max(size.x, size.z, 6);
-  const fov = cam.fov * (Math.PI / 180);
-  const distance = (maxDim / 2) / Math.tan(fov / 2) * 1.4;
+  const distance = computeFitDistance(cam, bbox);
 
   cam.position.set(
-    center.x + Math.cos(angle) * distance * 0.5,
-    center.y + distance * 0.9,
-    center.z + Math.sin(angle) * distance * 0.5,
+    center.x + Math.cos(angle) * distance * 0.25,
+    center.y + distance,
+    center.z + Math.sin(angle) * distance * 0.25,
   );
   cam.lookAt(center);
 }
