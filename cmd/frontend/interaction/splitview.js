@@ -34,56 +34,52 @@ const CAM_COLORS_HEX = [
   0xcc44ff, 0xff8844, 0x44cccc, 0xffcc00,
 ];
 
-// ── Workload ranking (errors first, then by namespace) ──────────
+// ── Namespace ranking (errors first, then alphabetical) ─────────
 
-function rankWorkloads() {
-  const errorWorkloads = [];
-  const healthyWorkloads = [];
+function rankNamespaces() {
+  const errorNamespaces = [];
+  const healthyNamespaces = [];
 
-  for (const wl of state.workloads) {
-    const ns = state.namespaces.get(wl.namespace);
-    if (!ns) continue;
-
+  for (const [nsName, ns] of state.namespaces) {
     let hasError = false;
-    const podPositions = [];
-
     for (const [, mesh] of ns.pods) {
       const pod = mesh.userData.pod;
-      if (!pod) continue;
-      if (pod.ownerKind === wl.kind && pod.ownerName === wl.name) {
-        const wp = new THREE.Vector3();
-        mesh.getWorldPosition(wp);
-        podPositions.push(wp);
-        if (ERROR_STATUSES.has(pod.status)) hasError = true;
+      if (pod && ERROR_STATUSES.has(pod.status)) {
+        hasError = true;
+        break;
       }
     }
 
-    // Compute center and bounding box
+    // Compute bounding box from the namespace platform
     const worldPos = new THREE.Vector3();
-    const bbox = new THREE.Box3();
+    ns.group.getWorldPosition(worldPos);
 
-    if (podPositions.length === 0) {
-      ns.group.getWorldPosition(worldPos);
-      bbox.setFromCenterAndSize(worldPos, new THREE.Vector3(4, 2, 4));
-    } else {
-      for (const p of podPositions) {
-        worldPos.add(p);
-        bbox.expandByPoint(p);
-      }
-      worldPos.divideScalar(podPositions.length);
-      // Pad bbox slightly
-      bbox.expandByScalar(1.5);
+    const bbox = new THREE.Box3();
+    // Include all pod positions for accurate framing
+    for (const [, mesh] of ns.pods) {
+      const wp = new THREE.Vector3();
+      mesh.getWorldPosition(wp);
+      bbox.expandByPoint(wp);
     }
 
-    const entry = { nsName: wl.namespace, wlName: wl.name, wlKind: wl.kind, worldPos, bbox, hasError };
-    if (hasError) {
-      errorWorkloads.push(entry);
+    if (bbox.isEmpty()) {
+      bbox.setFromCenterAndSize(worldPos, new THREE.Vector3(6, 2, 6));
     } else {
-      healthyWorkloads.push(entry);
+      bbox.expandByScalar(2);
+    }
+
+    const entry = { nsName, worldPos, bbox, hasError };
+    if (hasError) {
+      errorNamespaces.push(entry);
+    } else {
+      healthyNamespaces.push(entry);
     }
   }
 
-  return [...errorWorkloads, ...healthyWorkloads];
+  errorNamespaces.sort((a, b) => a.nsName.localeCompare(b.nsName));
+  healthyNamespaces.sort((a, b) => a.nsName.localeCompare(b.nsName));
+
+  return [...errorNamespaces, ...healthyNamespaces];
 }
 
 // ── Camera management ───────────────────────────────────────────
@@ -115,7 +111,7 @@ function updateSplitCameras(dt) {
   if (!splitView.active) return;
 
   splitView.time += dt;
-  const ranked = rankWorkloads();
+  const ranked = rankNamespaces();
   const count = splitView.count;
   const offset = splitView.offset;
 
@@ -326,11 +322,11 @@ function drawAllViewportLabels(layout, cellW, cellH) {
     if (i < splitView.targets.length) {
       const target = splitView.targets[i];
 
-      // Workload label (top-left)
-      _labelCtx.font = '12px monospace';
+      // Namespace label (top-left)
+      _labelCtx.font = '13px monospace';
       _labelCtx.fillStyle = target.hasError ? '#ff4444' : '#00ff88';
       _labelCtx.fillText(
-        `${target.wlKind}/${target.wlName} (${target.nsName})`,
+        `ns/${target.nsName}${target.hasError ? ' ⚠' : ''}`,
         cssX + 6,
         cssY + 16,
       );
@@ -349,7 +345,7 @@ function drawAllViewportLabels(layout, cellW, cellH) {
       // Empty viewport label
       _labelCtx.font = '12px monospace';
       _labelCtx.fillStyle = '#444444';
-      _labelCtx.fillText('No workload', cssX + 6, cssY + 16);
+      _labelCtx.fillText('No namespace', cssX + 6, cssY + 16);
     }
   }
 }
@@ -393,7 +389,7 @@ function toggleSplitView() {
 
 function navigateSplitView(direction) {
   if (!splitView.active) return;
-  const ranked = rankWorkloads();
+  const ranked = rankNamespaces();
   const maxOffset = Math.max(0, ranked.length - splitView.count);
 
   splitView.offset = Math.max(0, Math.min(maxOffset, splitView.offset + direction * splitView.count));
@@ -412,7 +408,7 @@ function updateSplitViewHUD() {
   }
 
   if (splitView.active) {
-    const ranked = rankWorkloads();
+    const ranked = rankNamespaces();
     const errorCount = ranked.filter(t => t.hasError).length;
     const page = Math.floor(splitView.offset / splitView.count) + 1;
     const totalPages = Math.max(1, Math.ceil(ranked.length / splitView.count));
