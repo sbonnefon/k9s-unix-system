@@ -11,9 +11,10 @@ const splitView = {
   active: false,
   count: 0,        // 0=off, 4, 6, 8
   cameras: [],     // PerspectiveCamera[]
-  targets: [],     // { nsName, wlName, wlKind, worldPos }[]
+  targets: [],     // { nsName, wlName, wlKind, worldPos, bbox }[]
   offset: 0,       // pagination offset for N/P
   time: 0,         // elapsed time for gentle orbit
+  dots: [],        // minimap dot sprites for split cameras
 };
 
 // Grid layouts for each split count
@@ -22,6 +23,16 @@ const LAYOUTS = {
   6: { cols: 3, rows: 2 },
   8: { cols: 4, rows: 2 },
 };
+
+// Colors for each camera viewport (used in labels + minimap dots)
+const CAM_COLORS = [
+  '#ff4444', '#00aaff', '#ffaa00', '#00ff88',
+  '#cc44ff', '#ff8844', '#44cccc', '#ffcc00',
+];
+const CAM_COLORS_HEX = [
+  0xff4444, 0x00aaff, 0xffaa00, 0x00ff88,
+  0xcc44ff, 0xff8844, 0x44cccc, 0xffcc00,
+];
 
 // ── Workload ranking (errors first, then by namespace) ──────────
 
@@ -33,38 +44,38 @@ function rankWorkloads() {
     const ns = state.namespaces.get(wl.namespace);
     if (!ns) continue;
 
-    // Check if any pod in this workload is in error
     let hasError = false;
+    const podPositions = [];
+
     for (const [, mesh] of ns.pods) {
       const pod = mesh.userData.pod;
       if (!pod) continue;
-      if (pod.ownerKind === wl.kind && pod.ownerName === wl.name && ERROR_STATUSES.has(pod.status)) {
-        hasError = true;
-        break;
-      }
-    }
-
-    // Compute world position of the workload's pods center
-    const worldPos = new THREE.Vector3();
-    let podCount = 0;
-    for (const [, mesh] of ns.pods) {
-      const pod = mesh.userData.pod;
-      if (pod && pod.ownerKind === wl.kind && pod.ownerName === wl.name) {
+      if (pod.ownerKind === wl.kind && pod.ownerName === wl.name) {
         const wp = new THREE.Vector3();
         mesh.getWorldPosition(wp);
-        worldPos.add(wp);
-        podCount++;
+        podPositions.push(wp);
+        if (ERROR_STATUSES.has(pod.status)) hasError = true;
       }
     }
 
-    if (podCount === 0) {
-      // Orphan workload — use namespace center
+    // Compute center and bounding box
+    const worldPos = new THREE.Vector3();
+    const bbox = new THREE.Box3();
+
+    if (podPositions.length === 0) {
       ns.group.getWorldPosition(worldPos);
+      bbox.setFromCenterAndSize(worldPos, new THREE.Vector3(4, 2, 4));
     } else {
-      worldPos.divideScalar(podCount);
+      for (const p of podPositions) {
+        worldPos.add(p);
+        bbox.expandByPoint(p);
+      }
+      worldPos.divideScalar(podPositions.length);
+      // Pad bbox slightly
+      bbox.expandByScalar(1.5);
     }
 
-    const entry = { nsName: wl.namespace, wlName: wl.name, wlKind: wl.kind, worldPos, hasError };
+    const entry = { nsName: wl.namespace, wlName: wl.name, wlKind: wl.kind, worldPos, bbox, hasError };
     if (hasError) {
       errorWorkloads.push(entry);
     } else {
@@ -72,7 +83,6 @@ function rankWorkloads() {
     }
   }
 
-  // Errors first, then healthy
   return [...errorWorkloads, ...healthyWorkloads];
 }
 
@@ -85,7 +95,25 @@ function ensureCameras(count) {
   }
 }
 
+function fitCameraToBox(cam, bbox, center) {
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+  const maxDim = Math.max(size.x, size.z, 3); // minimum 3 units
+  const fov = cam.fov * (Math.PI / 180);
+  const distance = (maxDim / 2) / Math.tan(fov / 2) + 2;
+
+  // Fixed elevated position — no orbit jitter
+  cam.position.set(
+    center.x + distance * 0.3,
+    center.y + distance * 0.8,
+    center.z + distance * 0.5,
+  );
+  cam.lookAt(center);
+}
+
 function updateSplitCameras(dt) {
+  if (!splitView.active) return;
+
   splitView.time += dt;
   const ranked = rankWorkloads();
   const count = splitView.count;
@@ -100,21 +128,106 @@ function updateSplitCameras(dt) {
     }
   }
 
-  // Position each camera looking at its workload with gentle orbit
+  // Position each camera to fit its workload bounding box
   for (let i = 0; i < splitView.targets.length; i++) {
     const target = splitView.targets[i];
     const cam = splitView.cameras[i];
-    const orbitAngle = splitView.time * 0.2 + i * 0.5; // slight phase offset per viewport
-    const radius = 8;
-    const height = 6;
-
-    cam.position.set(
-      target.worldPos.x + Math.cos(orbitAngle) * radius,
-      target.worldPos.y + height,
-      target.worldPos.z + Math.sin(orbitAngle) * radius,
-    );
-    cam.lookAt(target.worldPos);
+    fitCameraToBox(cam, target.bbox, target.worldPos);
   }
+
+  // Update minimap dots
+  updateMinimapDots();
+}
+
+// ── Minimap dots for split cameras ──────────────────────────────
+
+function createDotTexture(color) {
+  const size = 16;
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d');
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, size / 2 - 1, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // Number in center
+  return new THREE.CanvasTexture(c);
+}
+
+function createNumberedDotTexture(color, number) {
+  const size = 24;
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d');
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, size / 2 - 1, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.font = 'bold 14px monospace';
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(number), size / 2, size / 2);
+  return new THREE.CanvasTexture(c);
+}
+
+function ensureMinimapDots(count) {
+  // Remove excess dots
+  while (splitView.dots.length > count) {
+    const dot = splitView.dots.pop();
+    scene.remove(dot);
+    dot.material.map?.dispose();
+    dot.material.dispose();
+  }
+  // Create new dots
+  while (splitView.dots.length < count) {
+    const idx = splitView.dots.length;
+    const tex = createNumberedDotTexture(CAM_COLORS[idx % CAM_COLORS.length], idx + 1);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: tex,
+      depthTest: false,
+      transparent: true,
+    }));
+    sprite.scale.set(3, 3, 1);
+    sprite.visible = false;
+    scene.add(sprite);
+    splitView.dots.push(sprite);
+  }
+}
+
+function updateMinimapDots() {
+  if (!splitView.active) {
+    for (const dot of splitView.dots) dot.visible = false;
+    return;
+  }
+
+  ensureMinimapDots(splitView.targets.length);
+
+  for (let i = 0; i < splitView.dots.length; i++) {
+    const dot = splitView.dots[i];
+    if (i < splitView.targets.length) {
+      const cam = splitView.cameras[i];
+      dot.position.set(cam.position.x, 197, cam.position.z);
+      dot.visible = true;
+    } else {
+      dot.visible = false;
+    }
+  }
+}
+
+function cleanupMinimapDots() {
+  for (const dot of splitView.dots) {
+    scene.remove(dot);
+    dot.material.map?.dispose();
+    dot.material.dispose();
+  }
+  splitView.dots = [];
 }
 
 // ── Rendering ───────────────────────────────────────────────────
@@ -148,11 +261,7 @@ function renderSplitView() {
       cam.aspect = cellW / cellH;
       cam.updateProjectionMatrix();
       renderer.render(scene, cam);
-
-      // Draw label overlay
-      drawViewportLabel(x, y, cellW, cellH, splitView.targets[i]);
     } else {
-      // Empty viewport — just black
       renderer.setClearColor(0x020202, 1);
       renderer.clear();
     }
@@ -161,7 +270,10 @@ function renderSplitView() {
   renderer.setScissorTest(false);
   renderer.autoClear = true;
 
-  return true; // signal that we handled rendering
+  // Draw 2D label overlay on top
+  drawAllViewportLabels(layout, cellW, cellH);
+
+  return true;
 }
 
 // ── Viewport labels (2D canvas overlay) ─────────────────────────
@@ -185,31 +297,66 @@ function removeLabelOverlay() {
   }
 }
 
-function drawViewportLabel(x, y, cellW, cellH, target) {
+function drawAllViewportLabels(layout, cellW, cellH) {
   if (!_labelCanvas) return;
-  if (!_labelCtx) {
-    _labelCanvas.width = window.innerWidth;
-    _labelCanvas.height = window.innerHeight;
-    _labelCtx = _labelCanvas.getContext('2d');
+
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+
+  // Resize canvas to match window
+  if (_labelCanvas.width !== w || _labelCanvas.height !== h) {
+    _labelCanvas.width = w;
+    _labelCanvas.height = h;
   }
+  _labelCtx = _labelCanvas.getContext('2d');
+  _labelCtx.clearRect(0, 0, w, h);
 
-  // Convert WebGL coords (bottom-up) to CSS coords (top-down)
-  const cssY = window.innerHeight - y - cellH;
+  for (let i = 0; i < splitView.count; i++) {
+    const col = i % layout.cols;
+    const row = Math.floor(i / layout.cols);
+    const cssX = col * cellW;
+    const cssY = row * cellH;
+    const color = CAM_COLORS[i % CAM_COLORS.length];
 
-  _labelCtx.font = '12px monospace';
-  _labelCtx.fillStyle = target.hasError ? '#ff4444' : '#00ff88';
-  _labelCtx.fillText(
-    `${target.wlKind}/${target.wlName} (${target.nsName})`,
-    x + 6,
-    cssY + 16,
-  );
+    // Viewport border
+    _labelCtx.strokeStyle = color;
+    _labelCtx.lineWidth = 1;
+    _labelCtx.strokeRect(cssX, cssY, cellW, cellH);
+
+    if (i < splitView.targets.length) {
+      const target = splitView.targets[i];
+
+      // Workload label (top-left)
+      _labelCtx.font = '12px monospace';
+      _labelCtx.fillStyle = target.hasError ? '#ff4444' : '#00ff88';
+      _labelCtx.fillText(
+        `${target.wlKind}/${target.wlName} (${target.nsName})`,
+        cssX + 6,
+        cssY + 16,
+      );
+
+      // Camera number (bottom-right)
+      _labelCtx.font = 'bold 20px monospace';
+      _labelCtx.fillStyle = color;
+      _labelCtx.textAlign = 'right';
+      _labelCtx.fillText(
+        String(i + 1),
+        cssX + cellW - 8,
+        cssY + cellH - 8,
+      );
+      _labelCtx.textAlign = 'left'; // reset
+    } else {
+      // Empty viewport label
+      _labelCtx.font = '12px monospace';
+      _labelCtx.fillStyle = '#444444';
+      _labelCtx.fillText('No workload', cssX + 6, cssY + 16);
+    }
+  }
 }
 
 function clearLabelOverlay() {
   if (_labelCtx && _labelCanvas) {
-    _labelCanvas.width = window.innerWidth;
-    _labelCanvas.height = window.innerHeight;
-    _labelCtx = _labelCanvas.getContext('2d');
+    _labelCtx.clearRect(0, 0, _labelCanvas.width, _labelCanvas.height);
   }
 }
 
@@ -223,13 +370,12 @@ function toggleSplitView() {
   const nextCount = CYCLE[nextIdx];
 
   if (nextCount === 0) {
-    // Turning off
     splitView.active = false;
     splitView.count = 0;
     splitView.offset = 0;
     removeLabelOverlay();
+    cleanupMinimapDots();
 
-    // Restore full viewport
     renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
     renderer.setScissor(0, 0, window.innerWidth, window.innerHeight);
     renderer.setScissorTest(false);
@@ -269,7 +415,7 @@ function updateSplitViewHUD() {
     const ranked = rankWorkloads();
     const errorCount = ranked.filter(t => t.hasError).length;
     const page = Math.floor(splitView.offset / splitView.count) + 1;
-    const totalPages = Math.ceil(ranked.length / splitView.count);
+    const totalPages = Math.max(1, Math.ceil(ranked.length / splitView.count));
     el.style.opacity = '1';
     el.textContent = `SPLIT ${splitView.count}x | ${errorCount} errors | Page ${page}/${totalPages} [N/P: navigate, S: cycle]`;
   } else {
