@@ -26,6 +26,7 @@ import { statusColor } from '../core/materials.js';
 import { makeLabel, markBillboardsDirty } from '../rendering/labels.js';
 import { computeLayoutExtent } from '../rendering/namespaces.js';
 import { setPointerLocked } from './raycast.js';
+import { toggleAutopilot, stopAutopilot, autopilot } from './autopilot.js';
 
 // ── Fly Camera Controller ──────────────────────────────────────
 const velocity = new THREE.Vector3();
@@ -277,7 +278,7 @@ function updateControlsHint() {
   if (eagleEye.active) {
     hint.textContent = 'EAGLE EYE \u2022 WASD/Arrows: Pan \u2022 Scroll: Zoom \u2022 E: Exit \u2022 M: Minimap';
   } else {
-    hint.textContent = 'WASD/Arrows: Move \u00b7 Mouse: Look \u00b7 Shift: Fast \u00b7 Space/Ctrl: Up/Down \u00b7 Click: Lock cursor \u00b7 Esc: Unlock \u00b7 E: Eagle Eye \u00b7 M: Minimap';
+    hint.textContent = 'WASD/Arrows: Move \u00b7 Mouse: Look \u00b7 Shift: Fast \u00b7 Space/Ctrl: Up/Down \u00b7 Click: Lock cursor \u00b7 Esc: Unlock \u00b7 E: Eagle Eye \u00b7 M: Minimap \u00b7 T: Tour';
   }
 }
 
@@ -332,8 +333,14 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
+  if (e.code === 'KeyT' && !e.repeat) {
+    toggleAutopilot();
+    return;
+  }
+
   const movement = ['KeyW','KeyS','KeyA','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','ControlLeft','ControlRight'];
   if (movement.includes(e.code)) {
+    stopAutopilot();
     if ((e.code === 'KeyW' || e.code === 'KeyS') && spot.active && !flyTo.active) return;
     cancelFlyTo();
   }
@@ -383,6 +390,7 @@ document.addEventListener('pointerlockchange', () => {
 
 document.addEventListener('mousemove', (e) => {
   if (!pointerLocked) return;
+  stopAutopilot();
   cancelFlyTo();
   euler.setFromQuaternion(camera.quaternion);
   euler.y -= e.movementX * 0.002;

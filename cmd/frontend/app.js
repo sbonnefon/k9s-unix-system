@@ -29,6 +29,7 @@ import {
   updateCamera,
   updateSpotlight,
 } from './interaction/camera.js';
+import { updateAutopilot } from './interaction/autopilot.js';
 import { setRaycastDeps, updateRaycast } from './interaction/raycast.js';
 import {
   podMenu,
@@ -180,6 +181,7 @@ function animate() {
   const dt = clock.getDelta();
   const time = clock.getElapsedTime();
 
+  updateAutopilot(dt);
   updateCamera(dt);
   updateRaycast();
   updateSpotlight(dt);
