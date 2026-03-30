@@ -27,6 +27,7 @@ import { makeLabel, markBillboardsDirty } from '../rendering/labels.js';
 import { computeLayoutExtent } from '../rendering/namespaces.js';
 import { setPointerLocked } from './raycast.js';
 import { toggleAutopilot, stopAutopilot, autopilot } from './autopilot.js';
+import { toggleSplitView, navigateSplitView, splitView } from './splitview.js';
 
 // ── Fly Camera Controller ──────────────────────────────────────
 const velocity = new THREE.Vector3();
@@ -278,7 +279,7 @@ function updateControlsHint() {
   if (eagleEye.active) {
     hint.textContent = 'EAGLE EYE \u2022 WASD/Arrows: Pan \u2022 Scroll: Zoom \u2022 E: Exit \u2022 M: Minimap';
   } else {
-    hint.textContent = 'WASD/Arrows: Move \u00b7 Mouse: Look \u00b7 Shift: Fast \u00b7 Space/Ctrl: Up/Down \u00b7 Click: Lock cursor \u00b7 Esc: Unlock \u00b7 E: Eagle Eye \u00b7 M: Minimap \u00b7 T: Tour';
+    hint.textContent = 'WASD: Move \u00b7 Mouse: Look \u00b7 Shift: Fast \u00b7 Space/Ctrl: Up/Down \u00b7 E: Eagle Eye \u00b7 M: Minimap \u00b7 T: Tour \u00b7 S: Split';
   }
 }
 
@@ -296,7 +297,7 @@ function updateCamera(dt) {
 
   if (flyTo.active) { updateFlyTo(dt); return; }
 
-  const speed = keys['ShiftLeft'] || keys['ShiftRight'] ? 40 : 15;
+  const speed = keys['ShiftLeft'] || keys['ShiftRight'] ? 20 : 7.5;
   const direction = new THREE.Vector3();
 
   if (keys['KeyW'] || keys['ArrowUp']) direction.z -= 1;
@@ -335,6 +336,20 @@ document.addEventListener('keydown', (e) => {
 
   if (e.code === 'KeyT' && !e.repeat) {
     toggleAutopilot();
+    return;
+  }
+
+  if (e.code === 'KeyS' && !e.repeat && !pointerLocked) {
+    toggleSplitView();
+    return;
+  }
+
+  if (splitView.active && e.code === 'KeyN' && !e.repeat) {
+    navigateSplitView(1);
+    return;
+  }
+  if (splitView.active && e.code === 'KeyP' && !e.repeat) {
+    navigateSplitView(-1);
     return;
   }
 
